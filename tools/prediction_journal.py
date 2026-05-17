@@ -367,6 +367,19 @@ def metrics_by_strategy(predictions: list[dict[str, Any]], outcomes: list[dict[s
     return aggregate_metrics(predictions, outcomes, "strategy_name")
 
 
+def metrics_by_strategy_mode(predictions: list[dict[str, Any]], outcomes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return aggregate_metrics(predictions, outcomes, "strategy_mode")
+
+
+def metrics_by_symbol_timeframe(predictions: list[dict[str, Any]], outcomes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    enriched = []
+    for prediction in predictions:
+        item = dict(prediction)
+        item["symbol_timeframe"] = f"{prediction.get('symbol', 'UNKNOWN')}:{prediction.get('timeframe', 'unknown')}"
+        enriched.append(item)
+    return aggregate_metrics(enriched, outcomes, "symbol_timeframe")
+
+
 def aggregate_metrics(predictions: list[dict[str, Any]], outcomes: list[dict[str, Any]], key: str) -> list[dict[str, Any]]:
     prediction_map = {item["id"]: item for item in predictions}
     groups: dict[str, list[dict[str, Any]]] = {}
@@ -384,9 +397,39 @@ def aggregate_metrics(predictions: list[dict[str, Any]], outcomes: list[dict[str
         result.append({
             key: name,
             "evaluated_predictions": len(rows),
+            "total_signals": len(rows),
             "win_rate": round(len(wins) / len(rows) * 100, 6) if rows else 0,
             "loss_rate": round(len(losses) / len(rows) * 100, 6) if rows else 0,
+            "average_return": round(float(np.mean(returns)), 6) if returns else 0,
             "average_return_pct": round(float(np.mean(returns)), 6) if returns else 0,
             "total_return_pct": round(float(np.sum(returns)), 6) if returns else 0,
+            "profit_factor": calculate_profit_factor(rows),
+            "max_drawdown": calculate_return_drawdown(returns),
+            "sharpe": calculate_sharpe(returns),
         })
     return sorted(result, key=lambda item: item["evaluated_predictions"], reverse=True)
+
+
+def calculate_profit_factor(outcomes: list[dict[str, Any]]) -> float:
+    profits = sum(float(row.get("return_pct") or 0) for row in outcomes if float(row.get("return_pct") or 0) > 0)
+    losses = abs(sum(float(row.get("return_pct") or 0) for row in outcomes if float(row.get("return_pct") or 0) < 0))
+    if losses == 0:
+        return round(profits, 6) if profits > 0 else 0
+    return round(profits / losses, 6)
+
+
+def calculate_return_drawdown(returns: list[float]) -> float:
+    equity = 100.0
+    peak = equity
+    max_drawdown = 0.0
+    for ret in returns:
+        equity *= 1 + ret / 100
+        peak = max(peak, equity)
+        max_drawdown = max(max_drawdown, (peak - equity) / peak * 100 if peak else 0)
+    return round(max_drawdown, 6)
+
+
+def calculate_sharpe(returns: list[float]) -> float:
+    if len(returns) < 2 or np.std(returns) == 0:
+        return 0
+    return round(float(np.mean(returns) / np.std(returns) * np.sqrt(len(returns))), 6)

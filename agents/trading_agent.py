@@ -10,6 +10,7 @@ import asyncio
 from typing import TypedDict, Annotated, Sequence
 from datetime import datetime
 
+import pandas as pd
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage, AIMessage
 from langchain_core.tools import tool
@@ -19,6 +20,7 @@ import operator
 
 from tools.market_tool import get_market_analysis, get_top_cryptos, get_current_price
 from tools.news_tool import get_news
+from tools.strategy_signals import generate_strategy_signal_from_df
 
 
 # ── LLM Factory — intercambia proveedores sin cambiar código ──────────────
@@ -169,72 +171,65 @@ def build_agent(provider: str = "groq"):
 
 # ── Análisis de señal standalone ──────────────────────────────────────────
 
-async def generate_trading_signal(symbol: str, interval: str = "1h", provider: str = "groq") -> dict:
-    """
-    Genera una señal estructurada para guardar en Supabase.
-    Usado por el endpoint /signals/generate.
-    """
+async def generate_trading_signal(
+    symbol: str,
+    interval: str = "1h",
+    provider: str = "groq",
+    strategy_mode: str = "deterministic",
+    horizon_minutes: int = 60,
+) -> dict:
+    """Generate a structured signal for deterministic/model_based/hybrid comparison."""
     market = await get_market_analysis(symbol, interval)
-    news   = await get_news(symbol=symbol, limit=5)
+    news = await get_news(symbol=symbol, limit=5)
 
     if "error" in market:
         return {"error": market["error"]}
 
-    indicators = market.get("indicators", {})
-    analysis   = market.get("analysis", {})
+    candles = market.get("candles", [])
+    if not candles:
+        return {"error": "No candle data available for signal generation"}
 
-    # Lógica de señal basada en indicadores (reglas deterministas primero)
-    score = 0
-    reasons = []
+    df = pd.DataFrame([
+        {
+            "timestamp": pd.to_datetime(item["time"], unit="s", utc=True),
+            "open": item["open"],
+            "high": item["high"],
+            "low": item["low"],
+            "close": item["close"],
+            "volume": item.get("volume"),
+        }
+        for item in candles
+    ])
+    strategy_signal = generate_strategy_signal_from_df(
+        df,
+        strategy_mode=strategy_mode,
+        provider=provider,
+        horizon_minutes=horizon_minutes,
+    ).to_dict()
 
-    rsi = indicators.get("rsi", 50)
-    if rsi < 30:
-        score += 2; reasons.append(f"RSI={rsi:.1f} en zona de sobreventa (señal alcista)")
-    elif rsi > 70:
-        score -= 2; reasons.append(f"RSI={rsi:.1f} en zona de sobrecompra (señal bajista)")
-    else:
-        reasons.append(f"RSI={rsi:.1f} neutral")
-
-    if analysis.get("macd_signal") == "BULLISH":
-        score += 1; reasons.append("MACD positivo (momentum alcista)")
-    else:
-        score -= 1; reasons.append("MACD negativo (momentum bajista)")
-
-    bb_pos = analysis.get("bb_position", "")
-    if bb_pos == "BELOW_LOWER":
-        score += 2; reasons.append("Precio bajo banda inferior de Bollinger (posible rebote)")
-    elif bb_pos == "ABOVE_UPPER":
-        score -= 2; reasons.append("Precio sobre banda superior de Bollinger (posible corrección)")
-
-    news_sentiment = sum(1 for n in news if "bull" in n.get("title", "").lower()) - \
-                     sum(1 for n in news if "bear" in n.get("title", "").lower() or "crash" in n.get("title", "").lower())
-    if news_sentiment > 0:
-        score += 1; reasons.append("Sentimiento de noticias positivo")
-    elif news_sentiment < 0:
-        score -= 1; reasons.append("Sentimiento de noticias negativo")
-
-    # Señal final
-    if score >= 2:
-        signal_type = "BUY"
-        confidence  = min(50 + score * 10, 90)
-    elif score <= -2:
-        signal_type = "SELL"
-        confidence  = min(50 + abs(score) * 10, 90)
-    else:
-        signal_type = "HOLD"
-        confidence  = 40 + abs(score) * 5
-
-    price = indicators.get("price", 0)
+    news_context = [{"title": n["title"], "source": n["source"]} for n in news[:3]]
+    input_features = {
+        **strategy_signal["input_features"],
+        "news_context": news_context,
+    }
     return {
-        "symbol":          symbol.upper(),
-        "signal_type":     signal_type,
-        "confidence":      confidence,
-        "price_at_signal": price,
-        "entry_price":     price,
-        "stop_loss":       round(price * 0.95, 6),   # 5% stop loss por defecto
-        "take_profit":     round(price * 1.10, 6),   # 10% take profit por defecto
-        "reasoning":       " | ".join(reasons),
-        "indicators":      indicators,
-        "news_context":    [{"title": n["title"], "source": n["source"]} for n in news[:3]],
-        "model_used":      f"rule-based+{provider}",
+        "symbol": symbol.upper(),
+        "signal_type": strategy_signal["signal"],
+        "confidence": strategy_signal["confidence"],
+        "price_at_signal": strategy_signal["entry_price"],
+        "entry_price": strategy_signal["entry_price"],
+        "stop_loss": strategy_signal["stop_loss"],
+        "take_profit": strategy_signal["take_profit"],
+        "risk_reward_ratio": strategy_signal["risk_reward_ratio"],
+        "horizon_minutes": strategy_signal["horizon_minutes"],
+        "strategy_mode": strategy_signal["strategy_mode"],
+        "strategy_name": strategy_signal["strategy_name"],
+        "strategy_version": strategy_signal["strategy_version"],
+        "reasoning": strategy_signal["reasoning"],
+        "indicators": market.get("indicators", {}),
+        "input_features": input_features,
+        "news_context": news_context,
+        "model_provider": strategy_signal["model_provider"],
+        "model_name": strategy_signal["model_name"],
+        "model_used": strategy_signal["model_name"] or strategy_signal["strategy_name"],
     }
