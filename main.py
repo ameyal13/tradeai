@@ -83,6 +83,11 @@ class BacktestRequest(BaseModel):
     initial_capital: float = Field(default=1000.0, gt=0)
     timeframe: str = "1d"
     name: str = "My Strategy"
+    commission_pct: float = Field(default=0.001, ge=0)
+    slippage_pct: float = Field(default=0.0005, ge=0)
+    spread_pct: float = Field(default=0.0003, ge=0)
+    risk_per_trade_pct: float = Field(default=0.01, gt=0)
+    min_volume: Optional[float] = Field(default=None, ge=0)
 
 class SignalRequest(BaseModel):
     symbol: str
@@ -180,13 +185,23 @@ async def get_signals(symbol: Optional[str] = None, limit: int = 20):
 # ── Backtest endpoints ─────────────────────────────────────────────────────
 @app.post("/backtest/run")
 async def run_backtest_endpoint(req: BacktestRequest, background_tasks: BackgroundTasks):
-    """Inicia un backtest. Retorna ID inmediatamente, resultado disponible después."""
+    """Inicia un backtest V2. Retorna ID inmediatamente, resultado disponible después."""
     try:
+        strategy = {
+            **req.strategy,
+            "commission_pct": req.commission_pct,
+            "slippage_pct": req.slippage_pct,
+            "spread_pct": req.spread_pct,
+            "risk_per_trade_pct": req.risk_per_trade_pct,
+        }
+        if req.min_volume is not None:
+            strategy["min_volume"] = req.min_volume
+
         # Crear registro en Supabase con status PENDING
         record = supabase.table("backtests").insert({
             "name":           req.name,
             "symbol":         req.symbol.upper(),
-            "strategy":       json.dumps(req.strategy),
+            "strategy":       json.dumps(strategy),
             "timeframe":      req.timeframe,
             "date_from":      req.date_from,
             "date_to":        req.date_to,
@@ -199,7 +214,7 @@ async def run_backtest_endpoint(req: BacktestRequest, background_tasks: Backgrou
         # Ejecutar en background (no bloquea el request)
         background_tasks.add_task(
             _run_and_save_backtest,
-            backtest_id, req.symbol, req.strategy,
+            backtest_id, req.symbol, strategy,
             req.date_from, req.date_to, req.initial_capital, req.timeframe
         )
 
@@ -212,7 +227,7 @@ async def _run_and_save_backtest(backtest_id, symbol, strategy, date_from, date_
     """Tarea de background: corre backtest y actualiza Supabase."""
     try:
         result = await run_backtest(symbol, strategy, date_from, date_to, capital, timeframe)
-        supabase.table("backtests").update({
+        update_payload = {
             "final_capital":    result.get("final_capital"),
             "total_return_pct": result.get("total_return_pct"),
             "win_rate":         result.get("win_rate"),
@@ -223,9 +238,27 @@ async def _run_and_save_backtest(backtest_id, symbol, strategy, date_from, date_
             "losing_trades":    result.get("losing_trades"),
             "trades":           json.dumps(result.get("trades", [])),
             "equity_curve":     json.dumps(result.get("equity_curve", [])),
+            "metrics":          json.dumps({
+                "engine_version": result.get("engine_version"),
+                "buy_and_hold_return_pct": result.get("buy_and_hold_return_pct"),
+                "number_of_trades": result.get("number_of_trades"),
+                "average_trade_return": result.get("average_trade_return"),
+                "average_win": result.get("average_win"),
+                "average_loss": result.get("average_loss"),
+                "profit_factor": result.get("profit_factor"),
+                "expectancy": result.get("expectancy"),
+                "fees_total": result.get("fees_total"),
+                "slippage_total": result.get("slippage_total"),
+                "assumptions": result.get("assumptions", {}),
+            }),
             "status":           "DONE",
             "finished_at":      datetime.now(timezone.utc).isoformat(),
-        }).eq("id", backtest_id).execute()
+        }
+        try:
+            supabase.table("backtests").update(update_payload).eq("id", backtest_id).execute()
+        except Exception:
+            update_payload.pop("metrics", None)
+            supabase.table("backtests").update(update_payload).eq("id", backtest_id).execute()
     except Exception as e:
         supabase.table("backtests").update({
             "status": "ERROR", "error_msg": str(e)
