@@ -6,9 +6,10 @@ Deploy en Render.com (free tier) o Railway.
 import os
 import json
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
+import pandas as pd
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
@@ -22,6 +23,18 @@ load_dotenv()
 from tools.market_tool import get_market_analysis, get_top_cryptos, get_current_price
 from tools.news_tool import get_news
 from tools.backtest_tool import run_backtest
+from tools.prediction_journal import (
+    EVALUATED,
+    INVALID,
+    PredictionStore,
+    evaluate_prediction_against_candles,
+    fetch_future_klines,
+    metrics_by_signal,
+    metrics_by_strategy,
+    normalize_prediction,
+    parse_dt,
+    utc_now,
+)
 from agents.trading_agent import build_agent, generate_trading_signal
 from langchain_core.messages import HumanMessage
 
@@ -41,10 +54,16 @@ app.add_middleware(
 )
 
 # ── Supabase client (service role — solo backend) ──────────────────────────
-supabase: Client = create_client(
-    os.getenv("SUPABASE_URL"),
-    os.getenv("SUPABASE_SERVICE_ROLE_KEY"),
-)
+supabase: Optional[Client] = None
+if os.getenv("SUPABASE_URL") and os.getenv("SUPABASE_SERVICE_ROLE_KEY"):
+    try:
+        supabase = create_client(
+            os.getenv("SUPABASE_URL"),
+            os.getenv("SUPABASE_SERVICE_ROLE_KEY"),
+        )
+    except Exception:
+        supabase = None
+prediction_store = PredictionStore(supabase)
 
 # ── WebSocket connections manager ──────────────────────────────────────────
 class ConnectionManager:
@@ -93,6 +112,32 @@ class SignalRequest(BaseModel):
     symbol: str
     interval: str = "1h"
     provider: str = "groq"
+
+class PredictionCreateRequest(BaseModel):
+    user_id: Optional[str] = None
+    symbol: str
+    timeframe: str = "1h"
+    strategy_mode: str = "deterministic"
+    strategy_name: str = "manual"
+    strategy_version: str = "v1"
+    signal: str
+    confidence: float = Field(ge=0, le=100)
+    entry_price: float = Field(gt=0)
+    stop_loss: Optional[float] = None
+    take_profit: Optional[float] = None
+    risk_reward_ratio: Optional[float] = None
+    horizon_minutes: int = Field(default=60, gt=0)
+    input_features: dict = Field(default_factory=dict)
+    reasoning: str = ""
+    model_provider: Optional[str] = None
+    model_name: Optional[str] = None
+    created_at: Optional[str] = None
+
+class PredictionEvaluateRequest(BaseModel):
+    prediction_id: str
+    candles: list[dict] = Field(default_factory=list)
+    commission_pct: float = Field(default=0.001, ge=0)
+    slippage_pct: float = Field(default=0.0005, ge=0)
 
 class WatchlistRequest(BaseModel):
     symbol: str
@@ -155,14 +200,40 @@ async def generate_signal(req: SignalRequest):
         if "error" in signal:
             raise HTTPException(status_code=400, detail=signal["error"])
 
-        # Guardar en Supabase (sin user_id = señal global)
-        saved = supabase.table("signals").insert({
-            **signal,
-            "indicators":   json.dumps(signal.get("indicators", {})),
-            "news_context": json.dumps(signal.get("news_context", [])),
-        }).execute()
+        saved_id = None
+        try:
+            if supabase is not None:
+                saved = supabase.table("signals").insert({
+                    **signal,
+                    "indicators":   json.dumps(signal.get("indicators", {})),
+                    "news_context": json.dumps(signal.get("news_context", [])),
+                }).execute()
+                saved_id = saved.data[0]["id"] if saved.data else None
+        except Exception:
+            pass
 
-        return {"data": signal, "saved_id": saved.data[0]["id"] if saved.data else None}
+        journal_entry = prediction_store.create_prediction({
+            "symbol": signal.get("symbol", req.symbol),
+            "timeframe": req.interval,
+            "strategy_mode": "deterministic",
+            "strategy_name": "rule_based_signal",
+            "strategy_version": "v1",
+            "signal": signal.get("signal_type", "HOLD"),
+            "confidence": signal.get("confidence", 0),
+            "entry_price": signal.get("entry_price") or signal.get("price_at_signal"),
+            "stop_loss": signal.get("stop_loss"),
+            "take_profit": signal.get("take_profit"),
+            "horizon_minutes": 60,
+            "input_features": {
+                "indicators": signal.get("indicators", {}),
+                "news_context": signal.get("news_context", []),
+            },
+            "reasoning": signal.get("reasoning", ""),
+            "model_provider": req.provider,
+            "model_name": signal.get("model_used"),
+        })
+
+        return {"data": signal, "saved_id": saved_id, "prediction_id": journal_entry["id"]}
     except HTTPException:
         raise
     except Exception as e:
@@ -173,6 +244,8 @@ async def generate_signal(req: SignalRequest):
 async def get_signals(symbol: Optional[str] = None, limit: int = 20):
     """Historial de señales desde Supabase."""
     try:
+        if supabase is None:
+            return {"data": []}
         query = supabase.table("signals").select("*").order("created_at", desc=True).limit(limit)
         if symbol:
             query = query.eq("symbol", symbol.upper())
@@ -180,6 +253,104 @@ async def get_signals(symbol: Optional[str] = None, limit: int = 20):
         return {"data": result.data}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── Prediction journal / outcome evaluator ─────────────────────────────────
+@app.post("/predictions/create")
+async def create_prediction(req: PredictionCreateRequest):
+    """Crea una predicción medible en el prediction journal."""
+    try:
+        prediction = prediction_store.create_prediction(req.model_dump(exclude_none=True))
+        return {"data": prediction}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/predictions")
+async def list_predictions(status: Optional[str] = None, symbol: Optional[str] = None, limit: int = 100):
+    """Lista predicciones del journal."""
+    try:
+        return {"data": prediction_store.list_predictions(status=status, symbol=symbol, limit=limit)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/predictions/{prediction_id}")
+async def get_prediction(prediction_id: str):
+    """Obtiene una predicción por ID."""
+    prediction = prediction_store.get_prediction(prediction_id)
+    if not prediction:
+        raise HTTPException(status_code=404, detail="Prediction not found")
+    return {"data": prediction}
+
+
+async def _evaluate_prediction(prediction: dict, req: Optional[PredictionEvaluateRequest] = None) -> dict:
+    start = parse_dt(prediction["created_at"])
+    end = start + timedelta(minutes=int(prediction["horizon_minutes"]))
+    if req and req.candles:
+        candles = pd.DataFrame(req.candles)
+        commission_pct = req.commission_pct
+        slippage_pct = req.slippage_pct
+    else:
+        candles = await fetch_future_klines(prediction["symbol"], prediction["timeframe"], start, end)
+        commission_pct = 0.001
+        slippage_pct = 0.0005
+
+    outcome = evaluate_prediction_against_candles(
+        prediction,
+        candles,
+        commission_pct=commission_pct,
+        slippage_pct=slippage_pct,
+    )
+    saved_outcome = prediction_store.create_outcome(outcome)
+    status = INVALID if outcome["outcome"] == "INVALID_DATA" else EVALUATED
+    prediction_store.update_prediction_status(prediction["id"], status)
+    return saved_outcome
+
+
+@app.post("/predictions/evaluate")
+async def evaluate_prediction(req: PredictionEvaluateRequest):
+    """Evalúa una predicción contra velas posteriores a su timestamp."""
+    prediction = prediction_store.get_prediction(req.prediction_id)
+    if not prediction:
+        raise HTTPException(status_code=404, detail="Prediction not found")
+    try:
+        return {"data": await _evaluate_prediction(prediction, req)}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/predictions/evaluate-due")
+async def evaluate_due_predictions(limit: int = 100):
+    """Evalúa predicciones pending cuyo horizonte ya expiró."""
+    evaluated = []
+    errors = []
+    for prediction in prediction_store.due_predictions(now=utc_now(), limit=limit):
+        try:
+            evaluated.append(await _evaluate_prediction(prediction))
+        except Exception as e:
+            errors.append({"prediction_id": prediction.get("id"), "error": str(e)})
+    return {"evaluated": evaluated, "errors": errors, "count": len(evaluated)}
+
+
+@app.get("/metrics/signals")
+async def get_signal_metrics():
+    """Métricas agrupadas por BUY/SELL/HOLD."""
+    predictions = prediction_store.list_predictions(limit=10000)
+    outcomes = prediction_store.list_outcomes()
+    return {"data": metrics_by_signal(predictions, outcomes)}
+
+
+@app.get("/metrics/strategies")
+async def get_strategy_metrics():
+    """Métricas agrupadas por estrategia."""
+    predictions = prediction_store.list_predictions(limit=10000)
+    outcomes = prediction_store.list_outcomes()
+    return {"data": metrics_by_strategy(predictions, outcomes)}
 
 
 # ── Backtest endpoints ─────────────────────────────────────────────────────
