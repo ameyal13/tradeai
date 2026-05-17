@@ -1,0 +1,128 @@
+/* frontend/src/index.css */
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@300;400;500;600&display=swap');
+
+:root {
+  --bg:       #0a0c0f;
+  --bg2:      #111418;
+  --bg3:      #1a1f26;
+  --border:   #1e2530;
+  --border2:  #2a3340;
+  --text:     #e8edf3;
+  --muted:    #5a6a7a;
+  --muted2:   #3a4a5a;
+  --green:    #00d4a0;
+  --green-d:  #00a07a;
+  --red:      #ff4d6a;
+  --red-d:    #cc3050;
+  --amber:    #f0a030;
+  --blue:     #4090ff;
+  --purple:   #9060ff;
+  --mono:     'IBM Plex Mono', monospace;
+  --sans:     'IBM Plex Sans', sans-serif;
+  --radius:   6px;
+  --radius2:  10px;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: var(--bg); }
+::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 3px; }
+
+/* Utility classes */
+.mono { font-family: var(--mono); }
+.text-green { color: var(--green); }
+.text-red   { color: var(--red); }
+.text-amber { color: var(--amber); }
+.text-muted { color: var(--muted); }
+.text-blue  { color: var(--blue); }
+
+.card {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius2);
+  padding: 1rem 1.25rem;
+}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 500;
+  font-family: var(--mono);
+  letter-spacing: 0.03em;
+}
+.badge-buy    { background: rgba(0,212,160,0.15); color: var(--green); border: 1px solid rgba(0,212,160,0.3); }
+.badge-sell   { background: rgba(255,77,106,0.15); color: var(--red);   border: 1px solid rgba(255,77,106,0.3); }
+.badge-hold   { background: rgba(240,160,48,0.15); color: var(--amber); border: 1px solid rgba(240,160,48,0.3); }
+.badge-high   { background: rgba(255,77,106,0.15); color: var(--red);   border: 1px solid rgba(255,77,106,0.3); }
+.badge-medium { background: rgba(240,160,48,0.15); color: var(--amber); border: 1px solid rgba(240,160,48,0.3); }
+.badge-low    { background: rgba(90,106,122,0.15); color: var(--muted); border: 1px solid rgba(90,106,122,0.3); }
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 16px;
+  border-radius: var(--radius);
+  font-family: var(--sans);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  border: 1px solid transparent;
+  transition: all 0.15s;
+}
+.btn-primary { background: var(--green); color: #000; border-color: var(--green); }
+.btn-primary:hover { background: var(--green-d); border-color: var(--green-d); }
+.btn-secondary { background: transparent; color: var(--text); border-color: var(--border2); }
+.btn-secondary:hover { background: var(--bg3); border-color: var(--border2); }
+.btn-ghost { background: transparent; color: var(--muted); border-color: transparent; }
+.btn-ghost:hover { color: var(--text); background: var(--bg3); }
+.btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+input, select, textarea {
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: var(--radius);
+  padding: 8px 12px;
+  font-family: var(--sans);
+  font-size: 13px;
+  outline: none;
+  transition: border-color 0.15s;
+}
+input:focus, select:focus, textarea:focus { border-color: var(--border2); }
+select option { background: var(--bg3); }
+
+@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
+@keyframes fadeIn { from{opacity:0;transform:translateY(4px)} to{opacity:1;transform:translateY(0)} }
+@keyframes spin { to{transform:rotate(360deg)} }
+
+.loading-dot {
+  display: inline-block;
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: var(--green);
+  animation: pulse 1.2s ease-in-out infinite;
+}
+
+.spinner {
+  width: 18px; height: 18px;
+  border: 2px solid var(--border2);
+  border-top-color: var(--green);
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+}
