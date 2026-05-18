@@ -35,6 +35,7 @@ from tools.prediction_journal import (
     metrics_by_symbol_timeframe,
     normalize_prediction,
     parse_dt,
+    prediction_payload_from_signal_response,
     utc_now,
 )
 from agents.trading_agent import build_agent, generate_trading_signal
@@ -222,24 +223,15 @@ async def generate_signal(req: SignalRequest):
         except Exception:
             pass
 
-        journal_entry = prediction_store.create_prediction({
-            "symbol": signal.get("symbol", req.symbol),
-            "timeframe": req.interval,
-            "strategy_mode": signal.get("strategy_mode", req.strategy_mode),
-            "strategy_name": signal.get("strategy_name", "strategy_signal"),
-            "strategy_version": signal.get("strategy_version", "v1"),
-            "signal": signal.get("signal_type", "HOLD"),
-            "confidence": signal.get("confidence", 0),
-            "entry_price": signal.get("entry_price") or signal.get("price_at_signal"),
-            "stop_loss": signal.get("stop_loss"),
-            "take_profit": signal.get("take_profit"),
-            "risk_reward_ratio": signal.get("risk_reward_ratio"),
-            "horizon_minutes": signal.get("horizon_minutes", req.horizon_minutes),
-            "input_features": signal.get("input_features", {}),
-            "reasoning": signal.get("reasoning", ""),
-            "model_provider": signal.get("model_provider") or req.provider,
-            "model_name": signal.get("model_name") or signal.get("model_used"),
-        })
+        journal_entry = prediction_store.create_prediction(
+            prediction_payload_from_signal_response(
+                signal,
+                timeframe=req.interval,
+                requested_strategy_mode=req.strategy_mode,
+                requested_horizon_minutes=req.horizon_minutes,
+                provider=req.provider,
+            )
+        )
 
         return {"data": signal, "saved_id": saved_id, "prediction_id": journal_entry["id"]}
     except HTTPException:

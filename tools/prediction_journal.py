@@ -95,6 +95,34 @@ def normalize_prediction(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def prediction_payload_from_signal_response(
+    signal: dict[str, Any],
+    timeframe: str,
+    requested_strategy_mode: str = "deterministic",
+    requested_horizon_minutes: int = 60,
+    provider: str | None = None,
+) -> dict[str, Any]:
+    """Map a generated signal response into prediction_journal fields."""
+    return {
+        "symbol": signal.get("symbol"),
+        "timeframe": timeframe,
+        "strategy_mode": signal.get("strategy_mode", requested_strategy_mode),
+        "strategy_name": signal.get("strategy_name", "strategy_signal"),
+        "strategy_version": signal.get("strategy_version", "v1"),
+        "signal": signal.get("signal_type") or signal.get("signal", "HOLD"),
+        "confidence": signal.get("confidence", 0),
+        "entry_price": signal.get("entry_price") or signal.get("price_at_signal"),
+        "stop_loss": signal.get("stop_loss"),
+        "take_profit": signal.get("take_profit"),
+        "risk_reward_ratio": signal.get("risk_reward_ratio"),
+        "horizon_minutes": signal.get("horizon_minutes", requested_horizon_minutes),
+        "input_features": signal.get("input_features", {}),
+        "reasoning": signal.get("reasoning", ""),
+        "model_provider": signal.get("model_provider") or provider,
+        "model_name": signal.get("model_name") or signal.get("model_used"),
+    }
+
+
 def normalize_ohlcv(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     if "timestamp" in df.columns:
@@ -382,22 +410,26 @@ def metrics_by_symbol_timeframe(predictions: list[dict[str, Any]], outcomes: lis
 
 def aggregate_metrics(predictions: list[dict[str, Any]], outcomes: list[dict[str, Any]], key: str) -> list[dict[str, Any]]:
     prediction_map = {item["id"]: item for item in predictions}
-    groups: dict[str, list[dict[str, Any]]] = {}
+    prediction_groups: dict[str, list[dict[str, Any]]] = {}
+    outcome_groups: dict[str, list[dict[str, Any]]] = {}
+    for prediction in predictions:
+        prediction_groups.setdefault(str(prediction.get(key, "unknown")), []).append(prediction)
     for outcome in outcomes:
         prediction = prediction_map.get(outcome.get("prediction_id"))
         if not prediction:
             continue
-        groups.setdefault(str(prediction.get(key, "unknown")), []).append(outcome)
+        outcome_groups.setdefault(str(prediction.get(key, "unknown")), []).append(outcome)
 
     result = []
-    for name, rows in groups.items():
+    for name, group_predictions in prediction_groups.items():
+        rows = outcome_groups.get(name, [])
         returns = [float(row.get("return_pct") or 0) for row in rows]
         wins = [row for row in rows if row.get("outcome") == "WIN"]
         losses = [row for row in rows if row.get("outcome") == "LOSS"]
         result.append({
             key: name,
             "evaluated_predictions": len(rows),
-            "total_signals": len(rows),
+            "total_signals": len(group_predictions),
             "win_rate": round(len(wins) / len(rows) * 100, 6) if rows else 0,
             "loss_rate": round(len(losses) / len(rows) * 100, 6) if rows else 0,
             "average_return": round(float(np.mean(returns)), 6) if returns else 0,

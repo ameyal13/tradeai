@@ -252,10 +252,30 @@ def build_model_dataset(df: pd.DataFrame, horizon_candles: int = 3) -> tuple[pd.
 
 def model_based_signal_from_df(df: pd.DataFrame, horizon_minutes: int = 60, min_train_rows: int = 40) -> StrategySignal:
     features = add_features(df)
-    price = float(features.iloc[-1]["close"])
-    stop_loss, take_profit, rr = risk_levels(price, features.iloc[-1].get("atr"), "BUY", 1.5)
+    latest_row = features.iloc[-1]
+    price = float(latest_row["close"])
 
     x, y = build_model_dataset(features)
+    feature_cols = ["rsi", "macd_hist", "ema_fast", "ema_slow", "relative_volume", "return_1", "return_3", "volatility_10", "atr"]
+    latest_features = latest_row[feature_cols]
+    if latest_features.isna().any():
+        return StrategySignal(
+            strategy_mode="model_based",
+            strategy_name="numpy_logistic_temporal_split",
+            strategy_version="interface_v1",
+            signal="HOLD",
+            confidence=25,
+            entry_price=price,
+            stop_loss=None,
+            take_profit=None,
+            risk_reward_ratio=None,
+            horizon_minutes=horizon_minutes,
+            input_features={"model_available": False, "reason": "latest_features_incomplete"},
+            reasoning="Model interface ready, but latest closed candle lacks complete features.",
+            model_provider="local_numpy",
+            model_name="logistic_regression_no_sklearn",
+        )
+
     if len(x) < min_train_rows:
         return StrategySignal(
             strategy_mode="model_based",
@@ -279,7 +299,7 @@ def model_based_signal_from_df(df: pd.DataFrame, horizon_minutes: int = 60, min_
     train_y = y.iloc[:split].to_numpy(dtype=float)
     valid_x = x.iloc[split:-1].to_numpy(dtype=float)
     valid_y = y.iloc[split:-1].to_numpy(dtype=float)
-    latest_x = x.iloc[-1].to_numpy(dtype=float)
+    latest_x = latest_features.to_numpy(dtype=float)
 
     try:
         packed, bias = train_numpy_logistic_regression(train_x, train_y)
@@ -309,10 +329,10 @@ def model_based_signal_from_df(df: pd.DataFrame, horizon_minutes: int = 60, min_
 
     if probability >= 0.58:
         signal = "BUY"
-        sl, tp, rr = risk_levels(price, features.iloc[-1].get("atr"), "BUY", 1.5)
+        sl, tp, rr = risk_levels(price, latest_row.get("atr"), "BUY", 1.5)
     elif probability <= 0.42:
         signal = "SELL"
-        sl, tp, rr = risk_levels(price, features.iloc[-1].get("atr"), "SELL", 1.5)
+        sl, tp, rr = risk_levels(price, latest_row.get("atr"), "SELL", 1.5)
     else:
         signal = "HOLD"
         sl, tp, rr = None, None, None
@@ -336,8 +356,9 @@ def model_based_signal_from_df(df: pd.DataFrame, horizon_minutes: int = 60, min_
             "model_available": True,
             "probability_up": probability,
             "temporal_split": {"train_rows": len(train_x), "validation_rows": len(valid_x)},
+            "prediction_row": "latest_closed_candle",
             "validation_accuracy": validation_accuracy,
-            "latest_features": latest_feature_snapshot(features.iloc[-1]),
+            "latest_features": latest_feature_snapshot(latest_row),
             "dependency_note": "scikit-learn not required; numpy fallback model used",
         },
         reasoning=f"Temporal split numpy logistic model probability_up={probability:.3f}.",
