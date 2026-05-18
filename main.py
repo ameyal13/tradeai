@@ -23,6 +23,8 @@ load_dotenv()
 from tools.market_tool import get_market_analysis, get_top_cryptos, get_current_price
 from tools.news_tool import get_news
 from tools.backtest_tool import run_backtest
+from tools.historical_data import fetch_binance_klines, normalize_ohlcv as normalize_historical_ohlcv
+from tools.historical_replay import run_historical_replay
 from tools.prediction_journal import (
     EVALUATED,
     INVALID,
@@ -38,6 +40,7 @@ from tools.prediction_journal import (
     prediction_payload_from_signal_response,
     utc_now,
 )
+from tools.strategy_optimizer import run_walk_forward_optimizer
 from agents.trading_agent import build_agent, generate_trading_signal
 from langchain_core.messages import HumanMessage
 
@@ -143,11 +146,46 @@ class PredictionEvaluateRequest(BaseModel):
     candles: list[dict] = Field(default_factory=list)
     commission_pct: float = Field(default=0.001, ge=0)
     slippage_pct: float = Field(default=0.0005, ge=0)
+    spread_pct: float = Field(default=0.0003, ge=0)
 
 class WatchlistRequest(BaseModel):
     symbol: str
     name: str
     market: str = "crypto"
+
+class ReplayRunRequest(BaseModel):
+    symbol: str
+    interval: str = "1h"
+    strategy_mode: str = "deterministic"
+    candles: list[dict] = Field(default_factory=list)
+    start_time: Optional[str] = None
+    end_time: Optional[str] = None
+    limit: int = Field(default=300, gt=0)
+    horizon_candles: int = Field(default=3, gt=0)
+    horizon_minutes: int = Field(default=60, gt=0)
+    commission_pct: float = Field(default=0.001, ge=0)
+    slippage_pct: float = Field(default=0.0005, ge=0)
+    spread_pct: float = Field(default=0.0003, ge=0)
+    step_size: int = Field(default=1, gt=0)
+    min_history: int = Field(default=50, gt=1)
+    max_predictions: Optional[int] = Field(default=None, gt=0)
+    strategy_params: dict = Field(default_factory=dict)
+    persist: bool = False
+
+class OptimizerRunRequest(BaseModel):
+    symbol: str
+    interval: str = "1h"
+    strategy_mode: str = "deterministic"
+    candles: list[dict] = Field(default_factory=list)
+    start_time: Optional[str] = None
+    end_time: Optional[str] = None
+    limit: int = Field(default=300, gt=0)
+    train_size: int = Field(default=90, gt=10)
+    validation_size: int = Field(default=45, gt=10)
+    horizon_candles: int = Field(default=3, gt=0)
+    min_history: int = Field(default=40, gt=1)
+    step_size: int = Field(default=5, gt=0)
+    parameter_grid: Optional[dict] = None
 
 
 # ── Health check ───────────────────────────────────────────────────────────
@@ -293,16 +331,19 @@ async def _evaluate_prediction(prediction: dict, req: Optional[PredictionEvaluat
         candles = pd.DataFrame(req.candles)
         commission_pct = req.commission_pct
         slippage_pct = req.slippage_pct
+        spread_pct = req.spread_pct
     else:
         candles = await fetch_future_klines(prediction["symbol"], prediction["timeframe"], start, end)
         commission_pct = 0.001
         slippage_pct = 0.0005
+        spread_pct = 0.0003
 
     outcome = evaluate_prediction_against_candles(
         prediction,
         candles,
         commission_pct=commission_pct,
         slippage_pct=slippage_pct,
+        spread_pct=spread_pct,
     )
     saved_outcome = prediction_store.create_outcome(outcome)
     status = INVALID if outcome["outcome"] == "INVALID_DATA" else EVALUATED
@@ -369,6 +410,71 @@ async def get_symbol_timeframe_metrics():
     return {"data": metrics_by_symbol_timeframe(predictions, outcomes)}
 
 
+# ── Historical replay / optimizer ──────────────────────────────────────────
+async def _candles_from_request(req):
+    if req.candles:
+        return normalize_historical_ohlcv(pd.DataFrame(req.candles))
+    return await fetch_binance_klines(
+        req.symbol,
+        req.interval,
+        start_time=req.start_time,
+        end_time=req.end_time,
+        limit=req.limit,
+    )
+
+
+@app.post("/replay/run")
+async def replay_run(req: ReplayRunRequest):
+    """Run historical replay with manual candles or downloaded Binance candles."""
+    try:
+        candles = await _candles_from_request(req)
+        result = run_historical_replay(
+            candles,
+            symbol=req.symbol,
+            timeframe=req.interval,
+            strategy_mode=req.strategy_mode,
+            horizon_candles=req.horizon_candles,
+            horizon_minutes=req.horizon_minutes,
+            commission_pct=req.commission_pct,
+            slippage_pct=req.slippage_pct,
+            spread_pct=req.spread_pct,
+            step_size=req.step_size,
+            min_history=req.min_history,
+            max_predictions=req.max_predictions,
+            strategy_params=req.strategy_params,
+            store=prediction_store if req.persist else None,
+        )
+        return {"data": result}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/optimizer/run")
+async def optimizer_run(req: OptimizerRunRequest):
+    """Run walk-forward parameter optimization."""
+    try:
+        candles = await _candles_from_request(req)
+        result = run_walk_forward_optimizer(
+            candles,
+            symbol=req.symbol,
+            timeframe=req.interval,
+            strategy_mode=req.strategy_mode,
+            train_size=req.train_size,
+            validation_size=req.validation_size,
+            horizon_candles=req.horizon_candles,
+            min_history=req.min_history,
+            step_size=req.step_size,
+            parameter_grid=req.parameter_grid,
+        )
+        return {"data": result}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # ── Backtest endpoints ─────────────────────────────────────────────────────
 @app.post("/backtest/run")
 async def run_backtest_endpoint(req: BacktestRequest, background_tasks: BackgroundTasks):
@@ -383,6 +489,10 @@ async def run_backtest_endpoint(req: BacktestRequest, background_tasks: Backgrou
         }
         if req.min_volume is not None:
             strategy["min_volume"] = req.min_volume
+
+        if supabase is None:
+            result = await run_backtest(req.symbol, strategy, req.date_from, req.date_to, req.initial_capital, req.timeframe)
+            return {"status": "DONE", "data": result, "persistence": "none"}
 
         # Crear registro en Supabase con status PENDING
         record = supabase.table("backtests").insert({
@@ -412,6 +522,8 @@ async def run_backtest_endpoint(req: BacktestRequest, background_tasks: Backgrou
 
 async def _run_and_save_backtest(backtest_id, symbol, strategy, date_from, date_to, capital, timeframe):
     """Tarea de background: corre backtest y actualiza Supabase."""
+    if supabase is None:
+        return
     try:
         result = await run_backtest(symbol, strategy, date_from, date_to, capital, timeframe)
         update_payload = {
@@ -456,6 +568,8 @@ async def _run_and_save_backtest(backtest_id, symbol, strategy, date_from, date_
 async def get_backtest_result(backtest_id: str):
     """Obtiene resultado de un backtest por ID."""
     try:
+        if supabase is None:
+            raise HTTPException(status_code=503, detail="Supabase is required for persisted async backtests")
         result = supabase.table("backtests").select("*").eq("id", backtest_id).single().execute()
         if not result.data:
             raise HTTPException(status_code=404, detail="Backtest not found")
@@ -470,6 +584,8 @@ async def get_backtest_result(backtest_id: str):
 async def list_backtests(limit: int = 10):
     """Lista todos los backtests."""
     try:
+        if supabase is None:
+            raise HTTPException(status_code=503, detail="Supabase is required for persisted async backtests")
         result = supabase.table("backtests").select(
             "id, name, symbol, status, total_return_pct, win_rate, total_trades, created_at"
         ).order("created_at", desc=True).limit(limit).execute()

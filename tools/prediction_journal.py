@@ -148,6 +148,7 @@ def evaluate_prediction_against_candles(
     candles: pd.DataFrame,
     commission_pct: float = 0.001,
     slippage_pct: float = 0.0005,
+    spread_pct: float = 0.0003,
 ) -> dict[str, Any]:
     """Evaluate one prediction using candles after its creation timestamp."""
     pred = normalize_prediction(prediction)
@@ -165,6 +166,7 @@ def evaluate_prediction_against_candles(
     highs = path["high"].astype(float)
     lows = path["low"].astype(float)
 
+    ambiguous_intrabar = False
     if signal == "BUY":
         best_price = float(highs.max())
         worst_price = float(lows.min())
@@ -173,6 +175,8 @@ def evaluate_prediction_against_candles(
         mae = (entry - worst_price) / entry * 100
         hit_sl = pred["stop_loss"] is not None and bool((lows <= pred["stop_loss"]).any())
         hit_tp = pred["take_profit"] is not None and bool((highs >= pred["take_profit"]).any())
+        if pred["stop_loss"] is not None and pred["take_profit"] is not None:
+            ambiguous_intrabar = bool(((lows <= pred["stop_loss"]) & (highs >= pred["take_profit"])).any())
     elif signal == "SELL":
         best_price = float(lows.min())
         worst_price = float(highs.max())
@@ -181,14 +185,21 @@ def evaluate_prediction_against_candles(
         mae = (worst_price - entry) / entry * 100
         hit_sl = pred["stop_loss"] is not None and bool((highs >= pred["stop_loss"]).any())
         hit_tp = pred["take_profit"] is not None and bool((lows <= pred["take_profit"]).any())
+        if pred["stop_loss"] is not None and pred["take_profit"] is not None:
+            ambiguous_intrabar = bool(((highs >= pred["stop_loss"]) & (lows <= pred["take_profit"])).any())
     else:
         return build_invalid_or_expired_outcome(pred, path, signal)
 
     fees_paid = abs(entry + exit_price) * commission_pct
     slippage_cost = abs(entry + exit_price) * slippage_pct
-    net_return_pct = return_pct - ((fees_paid + slippage_cost) / entry * 100)
+    spread_cost = abs(entry + exit_price) * (spread_pct / 2)
+    net_return_pct = return_pct - ((fees_paid + slippage_cost + spread_cost) / entry * 100)
 
-    if hit_tp and not hit_sl:
+    notes = []
+    if ambiguous_intrabar:
+        outcome = "LOSS"
+        notes.append("ambiguous_intrabar_conservative_loss")
+    elif hit_tp and not hit_sl:
         outcome = "WIN"
     elif hit_sl and not hit_tp:
         outcome = "LOSS"
@@ -213,8 +224,12 @@ def evaluate_prediction_against_candles(
         "hit_take_profit": hit_tp,
         "outcome": outcome,
         "fees_paid": round(fees_paid, 8),
-        "slippage_cost": round(slippage_cost, 8),
-        "raw_path": candles_to_raw_path(path),
+        "slippage_cost": round(slippage_cost + spread_cost, 8),
+        "raw_path": {
+            "candles": candles_to_raw_path(path),
+            "notes": notes,
+            "costs": {"commission_pct": commission_pct, "slippage_pct": slippage_pct, "spread_pct": spread_pct},
+        },
     }
 
 

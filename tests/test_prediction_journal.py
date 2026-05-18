@@ -43,6 +43,7 @@ class PredictionOutcomeTests(unittest.TestCase):
             ]),
             commission_pct=0,
             slippage_pct=0,
+            spread_pct=0,
         )
 
         self.assertEqual(outcome["outcome"], "WIN")
@@ -57,6 +58,7 @@ class PredictionOutcomeTests(unittest.TestCase):
             ]),
             commission_pct=0,
             slippage_pct=0,
+            spread_pct=0,
         )
 
         self.assertEqual(outcome["outcome"], "LOSS")
@@ -71,6 +73,7 @@ class PredictionOutcomeTests(unittest.TestCase):
             ]),
             commission_pct=0,
             slippage_pct=0,
+            spread_pct=0,
         )
 
         self.assertEqual(outcome["outcome"], "WIN")
@@ -85,6 +88,7 @@ class PredictionOutcomeTests(unittest.TestCase):
             ]),
             commission_pct=0,
             slippage_pct=0,
+            spread_pct=0,
         )
 
         self.assertEqual(outcome["outcome"], "LOSS")
@@ -99,6 +103,7 @@ class PredictionOutcomeTests(unittest.TestCase):
             ]),
             commission_pct=0,
             slippage_pct=0,
+            spread_pct=0,
         )
 
         self.assertEqual(outcome["max_favorable_excursion_pct"], 12)
@@ -113,6 +118,7 @@ class PredictionOutcomeTests(unittest.TestCase):
             ]),
             commission_pct=0,
             slippage_pct=0,
+            spread_pct=0,
         )
 
         self.assertEqual(outcome["outcome"], "EXPIRED")
@@ -127,10 +133,57 @@ class PredictionOutcomeTests(unittest.TestCase):
             ]),
             commission_pct=0,
             slippage_pct=0,
+            spread_pct=0,
         )
 
         self.assertEqual(outcome["outcome"], "INVALID_DATA")
         self.assertEqual(outcome["raw_path"], [])
+
+    def test_ambiguous_intrabar_buy_is_conservative_loss(self):
+        outcome = evaluate_prediction_against_candles(
+            make_prediction("BUY"),
+            candles([
+                {"timestamp": "2026-01-01T00:15:00Z", "open": 100, "high": 111, "low": 94, "close": 102},
+            ]),
+            commission_pct=0,
+            slippage_pct=0,
+            spread_pct=0,
+        )
+
+        self.assertEqual(outcome["outcome"], "LOSS")
+        self.assertIn("ambiguous_intrabar_conservative_loss", outcome["raw_path"]["notes"])
+
+    def test_ambiguous_intrabar_sell_is_conservative_loss(self):
+        outcome = evaluate_prediction_against_candles(
+            make_prediction("SELL"),
+            candles([
+                {"timestamp": "2026-01-01T00:15:00Z", "open": 100, "high": 106, "low": 89, "close": 99},
+            ]),
+            commission_pct=0,
+            slippage_pct=0,
+            spread_pct=0,
+        )
+
+        self.assertEqual(outcome["outcome"], "LOSS")
+        self.assertIn("ambiguous_intrabar_conservative_loss", outcome["raw_path"]["notes"])
+
+    def test_spread_cost_reduces_return(self):
+        no_spread = evaluate_prediction_against_candles(
+            make_prediction("BUY", stop_loss=None, take_profit=None, horizon_minutes=30),
+            candles([{"timestamp": "2026-01-01T00:15:00Z", "open": 100, "high": 101, "low": 99, "close": 100.5}]),
+            commission_pct=0,
+            slippage_pct=0,
+            spread_pct=0,
+        )
+        with_spread = evaluate_prediction_against_candles(
+            make_prediction("BUY", stop_loss=None, take_profit=None, horizon_minutes=30),
+            candles([{"timestamp": "2026-01-01T00:15:00Z", "open": 100, "high": 101, "low": 99, "close": 100.5}]),
+            commission_pct=0,
+            slippage_pct=0,
+            spread_pct=0.01,
+        )
+
+        self.assertLess(with_spread["return_pct"], no_spread["return_pct"])
 
 
 if __name__ == "__main__":

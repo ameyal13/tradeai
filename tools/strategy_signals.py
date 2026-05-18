@@ -114,17 +114,36 @@ def add_features(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def risk_levels(price: float, atr: float | None, signal: str, min_rr: float = 1.5) -> tuple[float | None, float | None, float | None]:
+def risk_levels(
+    price: float,
+    atr: float | None,
+    signal: str,
+    min_rr: float = 1.5,
+    atr_stop_multiplier: float = 1.5,
+    atr_take_profit_multiplier: float | None = None,
+) -> tuple[float | None, float | None, float | None]:
     if signal == "HOLD" or price <= 0:
         return None, None, None
-    stop_distance = atr * 1.5 if atr is not None and not np.isnan(atr) and atr > 0 else price * 0.03
-    target_distance = stop_distance * min_rr
+    stop_distance = atr * atr_stop_multiplier if atr is not None and not np.isnan(atr) and atr > 0 else price * 0.03
+    target_distance = (atr * atr_take_profit_multiplier) if atr_take_profit_multiplier and atr is not None and not np.isnan(atr) and atr > 0 else stop_distance * min_rr
     if signal == "BUY":
         return price - stop_distance, price + target_distance, min_rr
     return price + stop_distance, price - target_distance, min_rr
 
 
-def deterministic_signal_from_df(df: pd.DataFrame, horizon_minutes: int = 60, min_rr: float = 1.5) -> StrategySignal:
+def deterministic_signal_from_df(
+    df: pd.DataFrame,
+    horizon_minutes: int = 60,
+    min_rr: float = 1.5,
+    strategy_params: dict[str, Any] | None = None,
+) -> StrategySignal:
+    strategy_params = strategy_params or {}
+    rsi_buy_threshold = float(strategy_params.get("rsi_buy_threshold", 35))
+    rsi_sell_threshold = float(strategy_params.get("rsi_sell_threshold", 65))
+    min_rr = float(strategy_params.get("min_risk_reward", min_rr))
+    atr_stop_multiplier = float(strategy_params.get("atr_stop_multiplier", 1.5))
+    atr_take_profit_multiplier = strategy_params.get("atr_take_profit_multiplier")
+    atr_take_profit_multiplier = float(atr_take_profit_multiplier) if atr_take_profit_multiplier is not None else None
     features = add_features(df)
     row = features.iloc[-1]
     price = float(row["close"])
@@ -133,10 +152,10 @@ def deterministic_signal_from_df(df: pd.DataFrame, horizon_minutes: int = 60, mi
 
     rsi = row.get("rsi")
     if pd.notna(rsi):
-        if rsi < 35:
+        if rsi < rsi_buy_threshold:
             score += 2
             reasons.append(f"RSI {rsi:.2f} oversold")
-        elif rsi > 65:
+        elif rsi > rsi_sell_threshold:
             score -= 2
             reasons.append(f"RSI {rsi:.2f} overbought")
         else:
@@ -164,7 +183,8 @@ def deterministic_signal_from_df(df: pd.DataFrame, horizon_minutes: int = 60, mi
 
     relative_volume = row.get("relative_volume")
     if pd.notna(relative_volume):
-        if relative_volume >= 1.2:
+        min_volume_ratio = float(strategy_params.get("min_volume_ratio", 1.2))
+        if relative_volume >= min_volume_ratio:
             score += 0.5 if score > 0 else -0.5 if score < 0 else 0
             reasons.append(f"Relative volume confirms move ({relative_volume:.2f}x)")
         else:
@@ -172,7 +192,7 @@ def deterministic_signal_from_df(df: pd.DataFrame, horizon_minutes: int = 60, mi
 
     signal = "BUY" if score >= 2 else "SELL" if score <= -2 else "HOLD"
     confidence = min(90, 45 + abs(score) * 10) if signal != "HOLD" else 40
-    stop_loss, take_profit, rr = risk_levels(price, row.get("atr"), signal, min_rr)
+    stop_loss, take_profit, rr = risk_levels(price, row.get("atr"), signal, min_rr, atr_stop_multiplier, atr_take_profit_multiplier)
 
     if signal != "HOLD" and (rr is None or rr < min_rr):
         signal = "HOLD"
@@ -250,7 +270,13 @@ def build_model_dataset(df: pd.DataFrame, horizon_candles: int = 3) -> tuple[pd.
     return data[valid], target[valid]
 
 
-def model_based_signal_from_df(df: pd.DataFrame, horizon_minutes: int = 60, min_train_rows: int = 40) -> StrategySignal:
+def model_based_signal_from_df(
+    df: pd.DataFrame,
+    horizon_minutes: int = 60,
+    min_train_rows: int = 40,
+    strategy_params: dict[str, Any] | None = None,
+) -> StrategySignal:
+    strategy_params = strategy_params or {}
     features = add_features(df)
     latest_row = features.iloc[-1]
     price = float(latest_row["close"])
@@ -327,12 +353,18 @@ def model_based_signal_from_df(df: pd.DataFrame, horizon_minutes: int = 60, min_
         preds = np.array([predict_numpy_logistic(packed, bias, row) >= 0.5 for row in valid_x])
         validation_accuracy = float((preds == valid_y.astype(bool)).mean())
 
-    if probability >= 0.58:
+    buy_threshold = float(strategy_params.get("probability_buy_threshold", 0.58))
+    sell_threshold = float(strategy_params.get("probability_sell_threshold", 0.42))
+    min_rr = float(strategy_params.get("min_risk_reward", 1.5))
+    atr_stop_multiplier = float(strategy_params.get("atr_stop_multiplier", 1.5))
+    atr_take_profit_multiplier = strategy_params.get("atr_take_profit_multiplier")
+    atr_take_profit_multiplier = float(atr_take_profit_multiplier) if atr_take_profit_multiplier is not None else None
+    if probability >= buy_threshold:
         signal = "BUY"
-        sl, tp, rr = risk_levels(price, latest_row.get("atr"), "BUY", 1.5)
-    elif probability <= 0.42:
+        sl, tp, rr = risk_levels(price, latest_row.get("atr"), "BUY", min_rr, atr_stop_multiplier, atr_take_profit_multiplier)
+    elif probability <= sell_threshold:
         signal = "SELL"
-        sl, tp, rr = risk_levels(price, latest_row.get("atr"), "SELL", 1.5)
+        sl, tp, rr = risk_levels(price, latest_row.get("atr"), "SELL", min_rr, atr_stop_multiplier, atr_take_profit_multiplier)
     else:
         signal = "HOLD"
         sl, tp, rr = None, None, None
@@ -367,9 +399,14 @@ def model_based_signal_from_df(df: pd.DataFrame, horizon_minutes: int = 60, min_
     )
 
 
-def hybrid_signal_from_df(df: pd.DataFrame, provider: str = "none", horizon_minutes: int = 60) -> StrategySignal:
-    deterministic = deterministic_signal_from_df(df, horizon_minutes=horizon_minutes)
-    model = model_based_signal_from_df(df, horizon_minutes=horizon_minutes)
+def hybrid_signal_from_df(
+    df: pd.DataFrame,
+    provider: str = "none",
+    horizon_minutes: int = 60,
+    strategy_params: dict[str, Any] | None = None,
+) -> StrategySignal:
+    deterministic = deterministic_signal_from_df(df, horizon_minutes=horizon_minutes, strategy_params=strategy_params)
+    model = model_based_signal_from_df(df, horizon_minutes=horizon_minutes, strategy_params=strategy_params)
     signal = deterministic.signal
     confidence = deterministic.confidence
     reasons = [deterministic.reasoning]
@@ -432,12 +469,13 @@ def generate_strategy_signal_from_df(
     strategy_mode: str = "deterministic",
     provider: str = "none",
     horizon_minutes: int = 60,
+    strategy_params: dict[str, Any] | None = None,
 ) -> StrategySignal:
     mode = strategy_mode.lower()
     if mode not in STRATEGY_MODES:
         raise ValueError("strategy_mode must be deterministic, model_based, or hybrid")
     if mode == "deterministic":
-        return deterministic_signal_from_df(df, horizon_minutes=horizon_minutes)
+        return deterministic_signal_from_df(df, horizon_minutes=horizon_minutes, strategy_params=strategy_params)
     if mode == "model_based":
-        return model_based_signal_from_df(df, horizon_minutes=horizon_minutes)
-    return hybrid_signal_from_df(df, provider=provider, horizon_minutes=horizon_minutes)
+        return model_based_signal_from_df(df, horizon_minutes=horizon_minutes, strategy_params=strategy_params)
+    return hybrid_signal_from_df(df, provider=provider, horizon_minutes=horizon_minutes, strategy_params=strategy_params)
