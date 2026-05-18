@@ -12,7 +12,7 @@ from typing import Optional
 import pandas as pd
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from dotenv import load_dotenv
 from supabase import create_client, Client
 import httpx
@@ -122,6 +122,8 @@ class SignalRequest(BaseModel):
     horizon_minutes: int = Field(default=60, gt=0)
 
 class PredictionCreateRequest(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
+
     user_id: Optional[str] = None
     symbol: str
     timeframe: str = "1h"

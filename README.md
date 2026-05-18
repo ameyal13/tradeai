@@ -74,5 +74,6 @@ These were not removed in this stabilization pass to avoid accidental breakage.
 This script uses the internet and should not be run as part of unit tests:
 
 ```powershell
+.\.venv\Scripts\python.exe -m scripts.smoke_real_market
 .\.venv\Scripts\python.exe scripts\smoke_real_market.py
 ```
