@@ -31,6 +31,8 @@ ALLOWED_STRATEGY_MODES = {"deterministic", "model_based", "hybrid", "xgboost"}
 DEFAULT_HORIZON_MINUTES = 60
 DEFAULT_MAX_CANDLES = 500
 DEFAULT_MAX_PREDICTIONS = 100
+HISTORICAL_SENTIMENT_USED = False
+HISTORICAL_SENTIMENT_NOTE = "Fear & Greed current value disabled for historical replay to avoid time leakage."
 MIN_EVALUATION_CANDLES_BY_INTERVAL_MINUTES = {
     60: 4,
     240: 4,
@@ -182,6 +184,11 @@ def summarize_run(
     strategy_mode: str,
     result: dict[str, Any] | None = None,
     error: str | None = None,
+    requested_horizon_minutes: int | None = None,
+    effective_horizon_minutes_value: int | None = None,
+    evaluation_horizon_candles: int | None = None,
+    sentiment_used: bool = HISTORICAL_SENTIMENT_USED,
+    sentiment_note: str = HISTORICAL_SENTIMENT_NOTE,
 ) -> dict[str, Any]:
     metric = first_metric(result or {})
     outcomes = (result or {}).get("outcomes") or []
@@ -197,6 +204,11 @@ def summarize_run(
         "symbol": symbol,
         "timeframe": timeframe,
         "strategy_mode": strategy_mode,
+        "requested_horizon_minutes": requested_horizon_minutes,
+        "effective_horizon_minutes": effective_horizon_minutes_value,
+        "evaluation_horizon_candles": evaluation_horizon_candles,
+        "sentiment_used": sentiment_used,
+        "sentiment_note": sentiment_note,
         "total_predictions": len((result or {}).get("predictions") or []),
         "evaluated_predictions": metric.get("evaluated_predictions", len(outcomes)),
         "win_rate": metric.get("win_rate", 0),
@@ -229,19 +241,35 @@ async def run_experiments(
 
     for symbol in symbols:
         for timeframe in timeframes:
+            replay_horizon_candles = horizon_candles_for_interval(horizon_minutes, timeframe)
+            replay_horizon_minutes = effective_horizon_minutes(horizon_minutes, timeframe)
+            if replay_horizon_minutes != horizon_minutes:
+                print(
+                    f"WARNING: {timeframe} requested_horizon_minutes={horizon_minutes} "
+                    f"effective_horizon_minutes={replay_horizon_minutes} "
+                    f"evaluation_horizon_candles={replay_horizon_candles}"
+                )
             candles = None
             try:
                 candles = await fetch_binance_klines(symbol, timeframe, limit=max_candles)
             except Exception as exc:
                 error = f"historical_data_error: {exc}"
                 for strategy_mode in strategy_modes:
-                    summaries.append(summarize_run(symbol, timeframe, strategy_mode, error=error))
+                    summaries.append(
+                        summarize_run(
+                            symbol,
+                            timeframe,
+                            strategy_mode,
+                            error=error,
+                            requested_horizon_minutes=horizon_minutes,
+                            effective_horizon_minutes_value=replay_horizon_minutes,
+                            evaluation_horizon_candles=replay_horizon_candles,
+                        )
+                    )
                 continue
 
             for strategy_mode in strategy_modes:
                 try:
-                    replay_horizon_candles = horizon_candles_for_interval(horizon_minutes, timeframe)
-                    replay_horizon_minutes = effective_horizon_minutes(horizon_minutes, timeframe)
                     result = run_historical_replay(
                         candles,
                         symbol=symbol,
@@ -250,9 +278,20 @@ async def run_experiments(
                         horizon_candles=replay_horizon_candles,
                         horizon_minutes=replay_horizon_minutes,
                         max_predictions=max_predictions,
+                        strategy_params={"use_sentiment": HISTORICAL_SENTIMENT_USED},
                         store=store,
                     )
-                    summaries.append(summarize_run(symbol, timeframe, strategy_mode, result=result))
+                    summaries.append(
+                        summarize_run(
+                            symbol,
+                            timeframe,
+                            strategy_mode,
+                            result=result,
+                            requested_horizon_minutes=horizon_minutes,
+                            effective_horizon_minutes_value=replay_horizon_minutes,
+                            evaluation_horizon_candles=replay_horizon_candles,
+                        )
+                    )
                     raw_runs.append({
                         "symbol": symbol,
                         "timeframe": timeframe,
@@ -260,11 +299,23 @@ async def run_experiments(
                         "requested_horizon_minutes": horizon_minutes,
                         "effective_horizon_minutes": replay_horizon_minutes,
                         "evaluation_horizon_candles": replay_horizon_candles,
+                        "sentiment_used": HISTORICAL_SENTIMENT_USED,
+                        "sentiment_note": HISTORICAL_SENTIMENT_NOTE,
                         "assumptions": result.get("assumptions", {}),
                         "metrics": result.get("metrics", []),
                     })
                 except Exception as exc:
-                    summaries.append(summarize_run(symbol, timeframe, strategy_mode, error=f"replay_error: {exc}"))
+                    summaries.append(
+                        summarize_run(
+                            symbol,
+                            timeframe,
+                            strategy_mode,
+                            error=f"replay_error: {exc}",
+                            requested_horizon_minutes=horizon_minutes,
+                            effective_horizon_minutes_value=replay_horizon_minutes,
+                            evaluation_horizon_candles=replay_horizon_candles,
+                        )
+                    )
 
     report = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -276,6 +327,8 @@ async def run_experiments(
             "max_candles": max_candles,
             "max_predictions_per_run": max_predictions,
             "evaluation_horizon_note": "1h and 4h runs use at least 4 future candles so TP/SL has time to resolve.",
+            "sentiment_used": HISTORICAL_SENTIMENT_USED,
+            "sentiment_note": HISTORICAL_SENTIMENT_NOTE,
             "persist": persist,
         },
         "summary": summaries,
@@ -297,6 +350,8 @@ def write_report(report: dict[str, Any], reports_dir: str | Path = "reports") ->
     rows = report["summary"]
     fieldnames = [
         "symbol", "timeframe", "strategy_mode", "total_predictions",
+        "requested_horizon_minutes", "effective_horizon_minutes",
+        "evaluation_horizon_candles", "sentiment_used", "sentiment_note",
         "evaluated_predictions", "win_rate", "average_return",
         "total_return_pct", "profit_factor", "max_drawdown", "sharpe",
         "invalid_count", "buy_count", "sell_count", "hold_count",
@@ -319,6 +374,8 @@ def write_report(report: dict[str, Any], reports_dir: str | Path = "reports") ->
 def print_summary(rows: list[dict[str, Any]]) -> None:
     headers = [
         "symbol", "timeframe", "strategy_mode", "total_predictions",
+        "requested_horizon_minutes", "effective_horizon_minutes",
+        "evaluation_horizon_candles", "sentiment_used",
         "evaluated_predictions", "win_rate", "average_return",
         "total_return_pct", "profit_factor", "max_drawdown", "sharpe",
         "invalid_count", "buy_count", "sell_count", "hold_count",

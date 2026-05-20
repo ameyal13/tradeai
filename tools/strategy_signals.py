@@ -471,17 +471,19 @@ def xgboost_signal_from_df(
     df: pd.DataFrame,
     horizon_minutes: int = 60,
     strategy_params: dict[str, Any] | None = None,
+    use_sentiment: bool = True,
 ) -> StrategySignal:
     try:
         features = add_features(df)
-        fear_greed = get_fear_greed_index()
+        fear_greed = get_fear_greed_index() if use_sentiment else None
         result = xgboost_signal(
             features,
             horizon_minutes=horizon_minutes,
             strategy_params=strategy_params,
             sentiment_features=fear_greed,
         )
-        result["reason"] = f"{result['reason']} | Fear & Greed: {fear_greed['classification']}"
+        if fear_greed:
+            result["reason"] = f"{result['reason']} | Fear & Greed: {fear_greed['classification']}"
     except ImportError as exc:
         import logging
 
@@ -539,5 +541,11 @@ def generate_strategy_signal_from_df(
     if mode == "model_based":
         return model_based_signal_from_df(df, horizon_minutes=horizon_minutes, strategy_params=strategy_params)
     if mode == "xgboost":
-        return xgboost_signal_from_df(df, horizon_minutes=horizon_minutes, strategy_params=strategy_params)
+        use_sentiment = bool((strategy_params or {}).get("use_sentiment", True))
+        return xgboost_signal_from_df(
+            df,
+            horizon_minutes=horizon_minutes,
+            strategy_params=strategy_params,
+            use_sentiment=use_sentiment,
+        )
     return hybrid_signal_from_df(df, provider=provider, horizon_minutes=horizon_minutes, strategy_params=strategy_params)

@@ -5,6 +5,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+import tools.historical_replay as historical_replay
 from tools.historical_replay import run_historical_replay
 from tools.prediction_journal import PredictionStore
 
@@ -43,6 +44,21 @@ class HistoricalReplayTests(unittest.TestCase):
             result = run_historical_replay(candles(110), "BTC", "1h", mode, min_history=35, max_predictions=2)
             self.assertGreater(len(result["predictions"]), 0)
             self.assertEqual(result["predictions"][0]["strategy_mode"], mode)
+
+    def test_xgboost_replay_uses_direct_normalize_prediction_without_hack(self):
+        self.assertFalse(hasattr(historical_replay, "normalize_replay_prediction"))
+        result = run_historical_replay(
+            candles(260),
+            "BTC",
+            "1h",
+            "xgboost",
+            min_history=230,
+            max_predictions=1,
+            strategy_params={"use_sentiment": False},
+        )
+
+        self.assertGreater(len(result["predictions"]), 0)
+        self.assertEqual(result["predictions"][0]["strategy_mode"], "xgboost")
 
     def test_hold_handled_without_outcome(self):
         result = run_historical_replay(candles(35), "BTC", "1h", "model_based", min_history=20, max_predictions=1)

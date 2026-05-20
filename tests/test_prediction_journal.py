@@ -2,7 +2,7 @@ import unittest
 
 import pandas as pd
 
-from tools.prediction_journal import evaluate_prediction_against_candles
+from tools.prediction_journal import evaluate_prediction_against_candles, normalize_prediction
 
 
 def make_prediction(signal="BUY", **overrides):
@@ -34,6 +34,11 @@ def candles(rows):
 
 
 class PredictionOutcomeTests(unittest.TestCase):
+    def test_normalize_prediction_accepts_xgboost_strategy_mode(self):
+        prediction = normalize_prediction(make_prediction("BUY", strategy_mode="xgboost"))
+
+        self.assertEqual(prediction["strategy_mode"], "xgboost")
+
     def test_outcome_buy_winner(self):
         outcome = evaluate_prediction_against_candles(
             make_prediction("BUY"),

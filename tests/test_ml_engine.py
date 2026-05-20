@@ -5,7 +5,7 @@ import numpy as np
 import pandas as pd
 
 from tools.ml_engine import walk_forward_accuracy, xgboost_signal
-from tools.strategy_signals import add_features, generate_strategy_signal_from_df
+from tools.strategy_signals import add_features, generate_strategy_signal_from_df, xgboost_signal_from_df
 
 
 def sample_candles(rows=300):
@@ -81,6 +81,47 @@ class MLEngineTests(unittest.TestCase):
 
         self.assertEqual(signal["strategy_mode"], "model_based")
         self.assertEqual(signal["model_provider"], "local_numpy")
+
+    def test_xgboost_signal_from_df_without_sentiment_does_not_fetch_fear_greed(self):
+        result = {
+            "model_available": True,
+            "probability_up": 0.5,
+            "signal": "HOLD",
+            "confidence": 10,
+            "validation_accuracy": 0.5,
+            "walk_forward_accuracy": 0.5,
+            "train_rows": 200,
+            "reason": "mock",
+            "sentiment_features": {},
+        }
+        with patch("tools.strategy_signals.get_fear_greed_index") as fear_greed:
+            with patch("tools.strategy_signals.xgboost_signal", return_value=result) as model:
+                signal = xgboost_signal_from_df(sample_candles(300), use_sentiment=False).to_dict()
+
+        fear_greed.assert_not_called()
+        self.assertIsNone(model.call_args.kwargs["sentiment_features"])
+        self.assertEqual(signal["strategy_mode"], "xgboost")
+
+    def test_xgboost_signal_from_df_with_sentiment_fetches_fear_greed(self):
+        fear_greed_payload = {"value": 10, "classification": "Extreme Fear", "timestamp": "1"}
+        result = {
+            "model_available": True,
+            "probability_up": 0.6,
+            "signal": "BUY",
+            "confidence": 20,
+            "validation_accuracy": 0.5,
+            "walk_forward_accuracy": 0.5,
+            "train_rows": 200,
+            "reason": "mock",
+            "sentiment_features": fear_greed_payload,
+        }
+        with patch("tools.strategy_signals.get_fear_greed_index", return_value=fear_greed_payload) as fear_greed:
+            with patch("tools.strategy_signals.xgboost_signal", return_value=result) as model:
+                signal = xgboost_signal_from_df(sample_candles(300), use_sentiment=True).to_dict()
+
+        fear_greed.assert_called_once()
+        self.assertEqual(model.call_args.kwargs["sentiment_features"], fear_greed_payload)
+        self.assertIn("Extreme Fear", signal["reasoning"])
 
 
 if __name__ == "__main__":

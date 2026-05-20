@@ -295,7 +295,39 @@ class HistoricalExperimentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(kwargs["strategy_mode"], "xgboost")
         self.assertEqual(kwargs["horizon_candles"], 4)
         self.assertEqual(kwargs["horizon_minutes"], 960)
+        self.assertEqual(kwargs["strategy_params"], {"use_sentiment": False})
         self.assertEqual(report["runs"][0]["effective_horizon_minutes"], 960)
+
+    async def test_historical_report_includes_sentiment_disabled_note(self):
+        import scripts.run_historical_experiments as script
+
+        replay_result = {
+            "predictions": [],
+            "outcomes": [],
+            "metrics": [],
+            "assumptions": {},
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.object(script, "fetch_binance_klines", new=AsyncMock(return_value=synthetic_candles())):
+                with patch.object(script, "run_historical_replay", return_value=replay_result):
+                    report = await script.run_experiments(
+                        symbols=["BTC"],
+                        timeframes=["1h"],
+                        strategy_modes=["xgboost"],
+                        reports_dir=tmp,
+                    )
+
+        self.assertFalse(report["config"]["sentiment_used"])
+        self.assertIn("avoid time leakage", report["config"]["sentiment_note"])
+        self.assertFalse(report["summary"][0]["sentiment_used"])
+        self.assertIn("requested_horizon_minutes", report["summary"][0])
+        self.assertIn("effective_horizon_minutes", report["summary"][0])
+        self.assertIn("evaluation_horizon_candles", report["summary"][0])
+
+    async def test_requirements_does_not_include_unused_lightgbm(self):
+        content = Path("requirements.txt").read_text(encoding="utf-8").lower()
+
+        self.assertNotIn("lightgbm", content)
 
 
 if __name__ == "__main__":
