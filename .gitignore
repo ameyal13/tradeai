@@ -10,3 +10,5 @@ data/
 dist/
 frontend/dist/
 .DS_Store
+
+reports/
