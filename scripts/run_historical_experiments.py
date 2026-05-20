@@ -21,7 +21,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from tools.historical_data import fetch_binance_klines
 from tools.historical_replay import run_historical_replay
-from tools.prediction_journal import PredictionStore
+from tools.prediction_journal import PredictionStore, calculate_profit_factor
 
 
 DEFAULT_SYMBOLS = ["BTC", "ETH", "SOL"]
@@ -54,6 +54,110 @@ def first_metric(result: dict[str, Any]) -> dict[str, Any]:
     return metrics[0] if metrics else {}
 
 
+def safe_float(value: Any) -> float | None:
+    try:
+        if value is None:
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def average(values: list[float]) -> float:
+    return round(sum(values) / len(values), 6) if values else 0
+
+
+def win_rate(outcomes: list[dict[str, Any]]) -> float:
+    if not outcomes:
+        return 0
+    wins = sum(1 for outcome in outcomes if outcome.get("outcome") == "WIN")
+    return round(wins / len(outcomes) * 100, 6)
+
+
+def average_return(outcomes: list[dict[str, Any]]) -> float:
+    returns = [safe_float(outcome.get("return_pct")) or 0 for outcome in outcomes]
+    return average(returns)
+
+
+def performance_for_predictions(predictions: list[dict[str, Any]], outcomes_by_prediction: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    rows = [outcomes_by_prediction[prediction["id"]] for prediction in predictions if prediction.get("id") in outcomes_by_prediction]
+    return {
+        "count": len(predictions),
+        "evaluated_predictions": len(rows),
+        "win_rate": win_rate(rows),
+        "average_return": average_return(rows),
+        "total_return_pct": round(sum(safe_float(row.get("return_pct")) or 0 for row in rows), 6) if rows else 0,
+        "profit_factor": calculate_profit_factor(rows),
+    }
+
+
+def confidence_bucket(confidence: Any) -> str:
+    value = safe_float(confidence)
+    if value is None:
+        return "unknown"
+    if value < 40:
+        return "0-40"
+    if value < 60:
+        return "40-60"
+    if value < 70:
+        return "60-70"
+    if value < 80:
+        return "70-80"
+    return "80-100"
+
+
+def diagnostic_metrics(result: dict[str, Any] | None) -> dict[str, Any]:
+    predictions = (result or {}).get("predictions") or []
+    outcomes = (result or {}).get("outcomes") or []
+    outcomes_by_prediction = {outcome.get("prediction_id"): outcome for outcome in outcomes if outcome.get("prediction_id")}
+
+    buy_predictions = [prediction for prediction in predictions if prediction.get("signal") == "BUY"]
+    sell_predictions = [prediction for prediction in predictions if prediction.get("signal") == "SELL"]
+    hold_predictions = [prediction for prediction in predictions if prediction.get("signal") == "HOLD"]
+    buy_perf = performance_for_predictions(buy_predictions, outcomes_by_prediction)
+    sell_perf = performance_for_predictions(sell_predictions, outcomes_by_prediction)
+
+    risk_rewards = [value for value in (safe_float(prediction.get("risk_reward_ratio")) for prediction in predictions) if value is not None]
+    confidences = [value for value in (safe_float(prediction.get("confidence")) for prediction in predictions) if value is not None]
+    stop_distances = []
+    take_profit_distances = []
+    for prediction in predictions:
+        entry = safe_float(prediction.get("entry_price"))
+        stop_loss = safe_float(prediction.get("stop_loss"))
+        take_profit = safe_float(prediction.get("take_profit"))
+        if entry and entry > 0 and stop_loss is not None:
+            stop_distances.append(abs(entry - stop_loss) / entry * 100)
+        if entry and entry > 0 and take_profit is not None:
+            take_profit_distances.append(abs(take_profit - entry) / entry * 100)
+
+    buckets: dict[str, list[dict[str, Any]]] = {name: [] for name in ["0-40", "40-60", "60-70", "70-80", "80-100", "unknown"]}
+    for prediction in predictions:
+        buckets.setdefault(confidence_bucket(prediction.get("confidence")), []).append(prediction)
+    bucket_metrics = {
+        name: performance_for_predictions(group, outcomes_by_prediction)
+        for name, group in buckets.items()
+        if group
+    }
+
+    return {
+        "buy_count": len(buy_predictions),
+        "sell_count": len(sell_predictions),
+        "hold_count": len(hold_predictions),
+        "buy_win_rate": buy_perf["win_rate"],
+        "sell_win_rate": sell_perf["win_rate"],
+        "buy_average_return": buy_perf["average_return"],
+        "sell_average_return": sell_perf["average_return"],
+        "avg_confidence": average(confidences),
+        "avg_risk_reward": average(risk_rewards),
+        "avg_stop_distance_pct": average(stop_distances),
+        "avg_take_profit_distance_pct": average(take_profit_distances),
+        "tp_hit_count": sum(1 for outcome in outcomes if outcome.get("hit_take_profit")),
+        "sl_hit_count": sum(1 for outcome in outcomes if outcome.get("hit_stop_loss")),
+        "expired_count": sum(1 for outcome in outcomes if outcome.get("outcome") == "EXPIRED"),
+        "confidence_buckets": bucket_metrics,
+    }
+
+
 def summarize_run(
     symbol: str,
     timeframe: str,
@@ -71,7 +175,7 @@ def summarize_run(
     if error:
         warnings.append(error)
 
-    return {
+    row = {
         "symbol": symbol,
         "timeframe": timeframe,
         "strategy_mode": strategy_mode,
@@ -86,6 +190,8 @@ def summarize_run(
         "invalid_count": invalid_count,
         "warnings": "; ".join(warnings),
     }
+    row.update(diagnostic_metrics(result))
+    return row
 
 
 async def run_experiments(
@@ -168,12 +274,20 @@ def write_report(report: dict[str, Any], reports_dir: str | Path = "reports") ->
         "symbol", "timeframe", "strategy_mode", "total_predictions",
         "evaluated_predictions", "win_rate", "average_return",
         "total_return_pct", "profit_factor", "max_drawdown", "sharpe",
-        "invalid_count", "warnings",
+        "invalid_count", "buy_count", "sell_count", "hold_count",
+        "buy_win_rate", "sell_win_rate", "buy_average_return",
+        "sell_average_return", "avg_confidence", "avg_risk_reward",
+        "avg_stop_distance_pct", "avg_take_profit_distance_pct",
+        "tp_hit_count", "sl_hit_count", "expired_count",
+        "confidence_buckets", "warnings",
     ]
     with csv_path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
-        writer.writerows(rows)
+        for row in rows:
+            csv_row = dict(row)
+            csv_row["confidence_buckets"] = json.dumps(csv_row.get("confidence_buckets", {}), sort_keys=True)
+            writer.writerow(csv_row)
     return {"json": str(json_path), "csv": str(csv_path)}
 
 
@@ -182,7 +296,11 @@ def print_summary(rows: list[dict[str, Any]]) -> None:
         "symbol", "timeframe", "strategy_mode", "total_predictions",
         "evaluated_predictions", "win_rate", "average_return",
         "total_return_pct", "profit_factor", "max_drawdown", "sharpe",
-        "invalid_count", "warnings",
+        "invalid_count", "buy_count", "sell_count", "hold_count",
+        "buy_win_rate", "sell_win_rate", "buy_average_return",
+        "sell_average_return", "avg_confidence", "avg_risk_reward",
+        "avg_stop_distance_pct", "avg_take_profit_distance_pct",
+        "tp_hit_count", "sl_hit_count", "expired_count", "warnings",
     ]
     widths = {header: max(len(header), *(len(str(row.get(header, ""))) for row in rows)) for header in headers}
     print(" | ".join(header.ljust(widths[header]) for header in headers))

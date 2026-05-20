@@ -20,6 +20,81 @@ def synthetic_candles(rows=180):
     })
 
 
+def diagnostic_result():
+    predictions = [
+        {
+            "id": "buy-win",
+            "signal": "BUY",
+            "confidence": 75,
+            "entry_price": 100,
+            "stop_loss": 95,
+            "take_profit": 110,
+            "risk_reward_ratio": 2,
+        },
+        {
+            "id": "sell-loss",
+            "signal": "SELL",
+            "confidence": 55,
+            "entry_price": 100,
+            "stop_loss": 105,
+            "take_profit": 90,
+            "risk_reward_ratio": 2,
+        },
+        {
+            "id": "hold",
+            "signal": "HOLD",
+            "confidence": 35,
+            "entry_price": 100,
+        },
+        {
+            "id": "buy-expired",
+            "signal": "BUY",
+            "confidence": 85,
+            "entry_price": 100,
+            "stop_loss": 97,
+            "take_profit": 106,
+            "risk_reward_ratio": 2,
+        },
+    ]
+    outcomes = [
+        {
+            "prediction_id": "buy-win",
+            "outcome": "WIN",
+            "return_pct": 2.0,
+            "hit_take_profit": True,
+            "hit_stop_loss": False,
+        },
+        {
+            "prediction_id": "sell-loss",
+            "outcome": "LOSS",
+            "return_pct": -1.0,
+            "hit_take_profit": False,
+            "hit_stop_loss": True,
+        },
+        {
+            "prediction_id": "buy-expired",
+            "outcome": "EXPIRED",
+            "return_pct": 0.2,
+            "hit_take_profit": False,
+            "hit_stop_loss": False,
+        },
+    ]
+    return {
+        "predictions": predictions,
+        "outcomes": outcomes,
+        "metrics": [{
+            "evaluated_predictions": 3,
+            "win_rate": 33.333333,
+            "average_return": 0.4,
+            "total_return_pct": 1.2,
+            "profit_factor": 2.2,
+            "max_drawdown": 1.0,
+            "sharpe": 0.5,
+        }],
+        "assumptions": {},
+    }
+
+
 class HistoricalExperimentTests(unittest.IsolatedAsyncioTestCase):
     async def test_generates_report_with_synthetic_data(self):
         import scripts.run_historical_experiments as script
@@ -122,6 +197,55 @@ class HistoricalExperimentTests(unittest.IsolatedAsyncioTestCase):
                 )
 
         row = report["summary"][0]
+        for key in [
+            "symbol", "timeframe", "strategy_mode", "total_predictions",
+            "evaluated_predictions", "win_rate", "average_return",
+            "total_return_pct", "profit_factor", "max_drawdown", "sharpe",
+            "invalid_count", "warnings",
+        ]:
+            self.assertIn(key, row)
+
+    async def test_report_includes_diagnostic_metrics(self):
+        import scripts.run_historical_experiments as script
+
+        row = script.summarize_run("BTC", "15m", "deterministic", result=diagnostic_result())
+
+        for key in [
+            "buy_count", "sell_count", "hold_count", "buy_win_rate",
+            "sell_win_rate", "buy_average_return", "sell_average_return",
+            "avg_confidence", "avg_risk_reward", "avg_stop_distance_pct",
+            "avg_take_profit_distance_pct", "tp_hit_count", "sl_hit_count",
+            "expired_count", "confidence_buckets",
+        ]:
+            self.assertIn(key, row)
+        self.assertEqual(row["buy_count"], 2)
+        self.assertEqual(row["sell_count"], 1)
+        self.assertEqual(row["hold_count"], 1)
+
+    async def test_separates_buy_vs_sell_performance(self):
+        import scripts.run_historical_experiments as script
+
+        row = script.summarize_run("BTC", "15m", "deterministic", result=diagnostic_result())
+
+        self.assertEqual(row["buy_win_rate"], 50)
+        self.assertEqual(row["sell_win_rate"], 0)
+        self.assertEqual(row["buy_average_return"], 1.1)
+        self.assertEqual(row["sell_average_return"], -1.0)
+
+    async def test_separates_exit_reasons(self):
+        import scripts.run_historical_experiments as script
+
+        row = script.summarize_run("BTC", "15m", "deterministic", result=diagnostic_result())
+
+        self.assertEqual(row["tp_hit_count"], 1)
+        self.assertEqual(row["sl_hit_count"], 1)
+        self.assertEqual(row["expired_count"], 1)
+
+    async def test_previous_report_fields_remain_available(self):
+        import scripts.run_historical_experiments as script
+
+        row = script.summarize_run("BTC", "15m", "deterministic", result=diagnostic_result())
+
         for key in [
             "symbol", "timeframe", "strategy_mode", "total_predictions",
             "evaluated_predictions", "win_rate", "average_return",
