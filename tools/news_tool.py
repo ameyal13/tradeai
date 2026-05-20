@@ -106,8 +106,6 @@ async def get_news(symbol: Optional[str] = None, limit: int = 15) -> list:
     Usado por el agente LangGraph.
     """
     cp_task  = fetch_cryptopanic(symbols=symbol, limit=limit)
-    rss_task = asyncio.to_thread(lambda: asyncio.run(fetch_rss_feeds()) if False else fetch_rss_feeds())
-
     cp_news, rss_news = await asyncio.gather(cp_task, fetch_rss_feeds())
 
     all_news = cp_news + rss_news

@@ -180,7 +180,7 @@ async def generate_trading_signal(
 ) -> dict:
     """Generate a structured signal for deterministic/model_based/hybrid comparison."""
     market = await get_market_analysis(symbol, interval)
-    news = await get_news(symbol=symbol, limit=5)
+    news = [] if provider == "none" else await get_news(symbol=symbol, limit=5)
 
     if "error" in market:
         return {"error": market["error"]}

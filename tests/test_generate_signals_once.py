@@ -4,6 +4,8 @@ from datetime import timedelta
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
+import pandas as pd
+
 from tools.prediction_journal import PredictionStore, utc_now
 
 
@@ -100,6 +102,30 @@ class GenerateSignalsOnceTests(unittest.IsolatedAsyncioTestCase):
         prediction = self.store.get_prediction(rows[0]["prediction_id"])
         self.assertEqual(prediction["status"], "pending")
         self.assertEqual(rows[0]["status"], "pending")
+
+    async def test_provider_none_does_not_fetch_news(self):
+        import agents.trading_agent as agent
+
+        idx = pd.date_range("2026-01-01", periods=80, freq="h", tz="UTC")
+        candles = [
+            {
+                "time": int(ts.timestamp()),
+                "open": 100 + i,
+                "high": 102 + i,
+                "low": 98 + i,
+                "close": 101 + i,
+                "volume": 1000,
+            }
+            for i, ts in enumerate(idx)
+        ]
+        market = {"candles": candles, "indicators": {}}
+
+        with patch.object(agent, "get_market_analysis", new=AsyncMock(return_value=market)):
+            with patch.object(agent, "get_news", new=AsyncMock(return_value=[])) as get_news:
+                result = await agent.generate_trading_signal("BTC", provider="none")
+
+        self.assertNotIn("error", result)
+        get_news.assert_not_called()
 
 
 if __name__ == "__main__":
