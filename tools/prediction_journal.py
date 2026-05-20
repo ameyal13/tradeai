@@ -17,7 +17,7 @@ import pandas as pd
 
 
 VALID_SIGNALS = {"BUY", "SELL", "HOLD"}
-VALID_MODES = {"deterministic", "model_based", "hybrid"}
+VALID_MODES = {"deterministic", "model_based", "hybrid", "xgboost"}
 PENDING = "pending"
 EVALUATED = "evaluated"
 INVALID = "invalid"
@@ -59,7 +59,7 @@ def normalize_prediction(payload: dict[str, Any]) -> dict[str, Any]:
     if signal not in VALID_SIGNALS:
         raise ValueError("signal must be BUY, SELL, or HOLD")
     if strategy_mode not in VALID_MODES:
-        raise ValueError("strategy_mode must be deterministic, model_based, or hybrid")
+        raise ValueError("strategy_mode must be deterministic, model_based, hybrid, or xgboost")
 
     entry_price = float(payload.get("entry_price", 0) or 0)
     stop_loss = payload.get("stop_loss")

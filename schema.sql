@@ -8,7 +8,7 @@ create table if not exists prediction_journal (
   user_id uuid null,
   symbol text not null,
   timeframe text not null,
-  strategy_mode text not null check (strategy_mode in ('deterministic', 'model_based', 'hybrid')),
+  strategy_mode text not null check (strategy_mode in ('deterministic', 'model_based', 'hybrid', 'xgboost')),
   strategy_name text not null,
   strategy_version text not null,
   signal text not null check (signal in ('BUY', 'SELL', 'HOLD')),
