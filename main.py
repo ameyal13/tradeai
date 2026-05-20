@@ -367,17 +367,55 @@ async def evaluate_prediction(req: PredictionEvaluateRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+async def evaluate_due_predictions_once(limit: int = 100, now: Optional[datetime] = None) -> dict:
+    """Evaluate pending predictions whose horizon has elapsed."""
+    checked_at = now or utc_now()
+    pending = prediction_store.list_predictions(status="pending", limit=limit, newest_first=False)
+    evaluated = []
+    invalid = []
+    not_due = []
+    errors = []
+
+    for prediction in pending:
+        prediction_id = prediction.get("id")
+        try:
+            due_at = parse_dt(prediction["created_at"]) + timedelta(minutes=int(prediction["horizon_minutes"]))
+            if due_at > checked_at:
+                not_due.append({
+                    "prediction_id": prediction_id,
+                    "due_at": due_at.isoformat(),
+                    "status": "not_due",
+                })
+                continue
+
+            outcome = await _evaluate_prediction(prediction)
+            if outcome.get("outcome") == "INVALID_DATA":
+                invalid.append(outcome)
+            else:
+                evaluated.append(outcome)
+        except Exception as e:
+            errors.append({"prediction_id": prediction_id, "error": str(e)})
+
+    return {
+        "found": len(pending),
+        "not_due": len(not_due),
+        "evaluated": len(evaluated),
+        "invalid": len(invalid),
+        "errors_count": len(errors),
+        "checked_at": checked_at.isoformat(),
+        "details": {
+            "not_due": not_due,
+            "evaluated": evaluated,
+            "invalid": invalid,
+            "errors": errors,
+        },
+    }
+
+
 @app.post("/predictions/evaluate-due")
 async def evaluate_due_predictions(limit: int = 100):
     """Evalúa predicciones pending cuyo horizonte ya expiró."""
-    evaluated = []
-    errors = []
-    for prediction in prediction_store.due_predictions(now=utc_now(), limit=limit):
-        try:
-            evaluated.append(await _evaluate_prediction(prediction))
-        except Exception as e:
-            errors.append({"prediction_id": prediction.get("id"), "error": str(e)})
-    return {"evaluated": evaluated, "errors": errors, "count": len(evaluated)}
+    return await evaluate_due_predictions_once(limit=limit)
 
 
 @app.get("/metrics/signals")

@@ -332,10 +332,21 @@ class PredictionStore:
         self._write_file(data)
         return prediction
 
-    def list_predictions(self, status: str | None = None, symbol: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+    def list_predictions(
+        self,
+        status: str | None = None,
+        symbol: str | None = None,
+        limit: int = 100,
+        newest_first: bool = True,
+    ) -> list[dict[str, Any]]:
         if self.supabase is not None:
             try:
-                query = self.supabase.table("prediction_journal").select("*").order("created_at", desc=True).limit(limit)
+                query = (
+                    self.supabase.table("prediction_journal")
+                    .select("*")
+                    .order("created_at", desc=newest_first)
+                    .limit(limit)
+                )
                 if status:
                     query = query.eq("status", status)
                 if symbol:
@@ -348,7 +359,7 @@ class PredictionStore:
             predictions = [item for item in predictions if item.get("status") == status]
         if symbol:
             predictions = [item for item in predictions if item.get("symbol") == symbol.upper()]
-        return sorted(predictions, key=lambda item: item.get("created_at", ""), reverse=True)[:limit]
+        return sorted(predictions, key=lambda item: item.get("created_at", ""), reverse=newest_first)[:limit]
 
     def get_prediction(self, prediction_id: str) -> dict[str, Any] | None:
         if self.supabase is not None:
@@ -395,7 +406,7 @@ class PredictionStore:
 
     def due_predictions(self, now: datetime | None = None, limit: int = 100) -> list[dict[str, Any]]:
         now = now or utc_now()
-        pending = self.list_predictions(status=PENDING, limit=limit)
+        pending = self.list_predictions(status=PENDING, limit=limit, newest_first=False)
         return [
             prediction for prediction in pending
             if parse_dt(prediction["created_at"]) + timedelta(minutes=int(prediction["horizon_minutes"])) <= now
