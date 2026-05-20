@@ -77,3 +77,21 @@ This script uses the internet and should not be run as part of unit tests:
 .\.venv\Scripts\python.exe -m scripts.smoke_real_market
 .\.venv\Scripts\python.exe scripts\smoke_real_market.py
 ```
+
+## Paper Trading Manual Loop
+
+This MVP flow only records and evaluates paper-trading predictions. It does not place real exchange orders.
+
+Generate one batch of signals:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\generate_signals_once.py
+```
+
+Wait for the configured horizon, currently 60 minutes by default, then evaluate due predictions:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\evaluate_due_once.py
+```
+
+The generator skips a symbol/timeframe/strategy mode when a recent pending prediction already exists inside the configured horizon.
