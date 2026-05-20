@@ -11,6 +11,7 @@ from ta.trend import EMAIndicator, MACD
 from ta.volatility import AverageTrueRange, BollingerBands
 
 from tools.ml_engine import xgboost_signal
+from tools.sentiment_engine import get_fear_greed_index
 
 
 STRATEGY_MODES = {"deterministic", "model_based", "hybrid", "xgboost"}
@@ -473,11 +474,14 @@ def xgboost_signal_from_df(
 ) -> StrategySignal:
     try:
         features = add_features(df)
+        fear_greed = get_fear_greed_index()
         result = xgboost_signal(
             features,
             horizon_minutes=horizon_minutes,
             strategy_params=strategy_params,
+            sentiment_features=fear_greed,
         )
+        result["reason"] = f"{result['reason']} | Fear & Greed: {fear_greed['classification']}"
     except ImportError as exc:
         import logging
 

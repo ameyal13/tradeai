@@ -64,17 +64,20 @@ class MLEngineTests(unittest.TestCase):
 
     def test_xgboost_mode_in_generate_strategy_signal(self):
         """generate_strategy_signal_from_df debe aceptar strategy_mode='xgboost'"""
-        signal = generate_strategy_signal_from_df(sample_candles(300), strategy_mode="xgboost").to_dict()
+        with patch("tools.strategy_signals.get_fear_greed_index", return_value={"value": 50, "classification": "Neutral", "timestamp": None}):
+            signal = generate_strategy_signal_from_df(sample_candles(300), strategy_mode="xgboost").to_dict()
 
         self.assertEqual(signal["strategy_mode"], "xgboost")
         self.assertEqual(signal["model_provider"], "local_xgboost")
         self.assertEqual(signal["model_name"], "xgboost_classifier_v1")
         self.assertIn(signal["signal"], {"BUY", "SELL", "HOLD"})
+        self.assertEqual(signal["input_features"]["sentiment_features"]["classification"], "Neutral")
 
     def test_fallback_when_xgboost_not_available(self):
         """Si xgboost no está instalado, debe hacer fallback a model_based sin crash"""
-        with patch("tools.strategy_signals.xgboost_signal", side_effect=ImportError("xgboost missing")):
-            signal = generate_strategy_signal_from_df(sample_candles(300), strategy_mode="xgboost").to_dict()
+        with patch("tools.strategy_signals.get_fear_greed_index", return_value={"value": 50, "classification": "Neutral", "timestamp": None}):
+            with patch("tools.strategy_signals.xgboost_signal", side_effect=ImportError("xgboost missing")):
+                signal = generate_strategy_signal_from_df(sample_candles(300), strategy_mode="xgboost").to_dict()
 
         self.assertEqual(signal["strategy_mode"], "model_based")
         self.assertEqual(signal["model_provider"], "local_numpy")

@@ -27,9 +27,14 @@ from tools.prediction_journal import PredictionStore, calculate_profit_factor
 DEFAULT_SYMBOLS = ["BTC", "ETH", "SOL"]
 DEFAULT_TIMEFRAMES = ["15m", "1h"]
 DEFAULT_STRATEGY_MODES = ["deterministic"]
+ALLOWED_STRATEGY_MODES = {"deterministic", "model_based", "hybrid", "xgboost"}
 DEFAULT_HORIZON_MINUTES = 60
 DEFAULT_MAX_CANDLES = 500
 DEFAULT_MAX_PREDICTIONS = 100
+MIN_EVALUATION_CANDLES_BY_INTERVAL_MINUTES = {
+    60: 4,
+    240: 4,
+}
 
 
 def interval_to_minutes(interval: str) -> int:
@@ -46,7 +51,20 @@ def interval_to_minutes(interval: str) -> int:
 
 def horizon_candles_for_interval(horizon_minutes: int, interval: str) -> int:
     interval_minutes = interval_to_minutes(interval)
-    return max(1, int((horizon_minutes + interval_minutes - 1) / interval_minutes))
+    requested = max(1, int((horizon_minutes + interval_minutes - 1) / interval_minutes))
+    minimum = MIN_EVALUATION_CANDLES_BY_INTERVAL_MINUTES.get(interval_minutes, 1)
+    return max(requested, minimum)
+
+
+def effective_horizon_minutes(horizon_minutes: int, interval: str) -> int:
+    return horizon_candles_for_interval(horizon_minutes, interval) * interval_to_minutes(interval)
+
+
+def validate_strategy_modes(strategy_modes: list[str]) -> list[str]:
+    invalid = [mode for mode in strategy_modes if mode not in ALLOWED_STRATEGY_MODES]
+    if invalid:
+        raise ValueError(f"Unsupported strategy_mode(s): {', '.join(invalid)}")
+    return strategy_modes
 
 
 def first_metric(result: dict[str, Any]) -> dict[str, Any]:
@@ -204,6 +222,7 @@ async def run_experiments(
     persist: bool = False,
     reports_dir: str | Path = "reports",
 ) -> dict[str, Any]:
+    strategy_modes = validate_strategy_modes(strategy_modes)
     store = PredictionStore() if persist else None
     summaries: list[dict[str, Any]] = []
     raw_runs: list[dict[str, Any]] = []
@@ -221,13 +240,15 @@ async def run_experiments(
 
             for strategy_mode in strategy_modes:
                 try:
+                    replay_horizon_candles = horizon_candles_for_interval(horizon_minutes, timeframe)
+                    replay_horizon_minutes = effective_horizon_minutes(horizon_minutes, timeframe)
                     result = run_historical_replay(
                         candles,
                         symbol=symbol,
                         timeframe=timeframe,
                         strategy_mode=strategy_mode,
-                        horizon_candles=horizon_candles_for_interval(horizon_minutes, timeframe),
-                        horizon_minutes=horizon_minutes,
+                        horizon_candles=replay_horizon_candles,
+                        horizon_minutes=replay_horizon_minutes,
                         max_predictions=max_predictions,
                         store=store,
                     )
@@ -236,6 +257,9 @@ async def run_experiments(
                         "symbol": symbol,
                         "timeframe": timeframe,
                         "strategy_mode": strategy_mode,
+                        "requested_horizon_minutes": horizon_minutes,
+                        "effective_horizon_minutes": replay_horizon_minutes,
+                        "evaluation_horizon_candles": replay_horizon_candles,
                         "assumptions": result.get("assumptions", {}),
                         "metrics": result.get("metrics", []),
                     })
@@ -251,6 +275,7 @@ async def run_experiments(
             "horizon_minutes": horizon_minutes,
             "max_candles": max_candles,
             "max_predictions_per_run": max_predictions,
+            "evaluation_horizon_note": "1h and 4h runs use at least 4 future candles so TP/SL has time to resolve.",
             "persist": persist,
         },
         "summary": summaries,

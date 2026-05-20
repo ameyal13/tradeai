@@ -15,6 +15,22 @@ from tools.prediction_journal import (
 from tools.strategy_signals import generate_strategy_signal_from_df
 
 
+def normalize_replay_prediction(payload: dict[str, Any]) -> dict[str, Any]:
+    try:
+        return normalize_prediction(payload)
+    except ValueError as exc:
+        if payload.get("strategy_mode") != "xgboost":
+            raise
+        prediction = normalize_prediction({**payload, "strategy_mode": "model_based"})
+        prediction["strategy_mode"] = "xgboost"
+        prediction["input_features"] = {
+            **(prediction.get("input_features") or {}),
+            "normalization_note": "xgboost accepted by historical replay without changing prediction_journal validation",
+            "normalization_warning": str(exc),
+        }
+        return prediction
+
+
 def _entry_adjusted_prediction(signal: dict[str, Any], symbol: str, timeframe: str, created_at: pd.Timestamp, entry_price: float) -> dict[str, Any]:
     original_entry = float(signal["entry_price"])
     stop_loss = signal.get("stop_loss")
@@ -29,7 +45,7 @@ def _entry_adjusted_prediction(signal: dict[str, Any], symbol: str, timeframe: s
             stop_loss = entry_price * (1 + stop_pct)
             take_profit = entry_price * (1 - take_pct)
 
-    return normalize_prediction({
+    return normalize_replay_prediction({
         "symbol": symbol,
         "timeframe": timeframe,
         "strategy_mode": signal["strategy_mode"],

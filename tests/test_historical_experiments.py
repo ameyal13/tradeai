@@ -254,6 +254,49 @@ class HistoricalExperimentTests(unittest.IsolatedAsyncioTestCase):
         ]:
             self.assertIn(key, row)
 
+    async def test_xgboost_is_allowed_strategy_mode(self):
+        import scripts.run_historical_experiments as script
+
+        self.assertEqual(script.validate_strategy_modes(["deterministic", "xgboost"]), ["deterministic", "xgboost"])
+
+    async def test_4h_horizon_uses_enough_minutes_for_future_candles(self):
+        import scripts.run_historical_experiments as script
+
+        self.assertEqual(script.horizon_candles_for_interval(60, "4h"), 4)
+        self.assertEqual(script.effective_horizon_minutes(60, "4h"), 960)
+
+    async def test_1h_horizon_extends_when_single_candle_would_expire_too_often(self):
+        import scripts.run_historical_experiments as script
+
+        self.assertEqual(script.horizon_candles_for_interval(60, "1h"), 4)
+        self.assertEqual(script.effective_horizon_minutes(60, "1h"), 240)
+
+    async def test_run_experiments_passes_effective_horizon_to_replay(self):
+        import scripts.run_historical_experiments as script
+
+        replay_result = {
+            "predictions": [],
+            "outcomes": [],
+            "metrics": [],
+            "assumptions": {},
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.object(script, "fetch_binance_klines", new=AsyncMock(return_value=synthetic_candles())):
+                with patch.object(script, "run_historical_replay", return_value=replay_result) as replay:
+                    report = await script.run_experiments(
+                        symbols=["BTC"],
+                        timeframes=["4h"],
+                        strategy_modes=["xgboost"],
+                        horizon_minutes=60,
+                        reports_dir=tmp,
+                    )
+
+        kwargs = replay.call_args.kwargs
+        self.assertEqual(kwargs["strategy_mode"], "xgboost")
+        self.assertEqual(kwargs["horizon_candles"], 4)
+        self.assertEqual(kwargs["horizon_minutes"], 960)
+        self.assertEqual(report["runs"][0]["effective_horizon_minutes"], 960)
+
 
 if __name__ == "__main__":
     unittest.main()

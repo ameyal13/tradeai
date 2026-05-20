@@ -10,6 +10,8 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from tools.sentiment_engine import fear_greed_to_feature
+
 
 FEATURE_COLS = [
     "rsi", "macd_hist", "ema_fast", "ema_slow",
@@ -41,6 +43,22 @@ def _feature_frame(df: pd.DataFrame) -> pd.DataFrame:
     for col in FEATURE_COLS:
         if col not in data.columns:
             data[col] = np.nan
+    return data
+
+
+def _feature_cols(sentiment_features: dict[str, Any] | None = None) -> list[str]:
+    cols = list(FEATURE_COLS)
+    if sentiment_features is not None:
+        cols.append("fear_greed_feature")
+    return cols
+
+
+def _apply_sentiment_features(df: pd.DataFrame, sentiment_features: dict[str, Any] | None = None) -> pd.DataFrame:
+    data = df.copy()
+    if sentiment_features is None:
+        return data
+    value = sentiment_features.get("value", 50)
+    data["fear_greed_feature"] = fear_greed_to_feature(int(value))
     return data
 
 
@@ -115,17 +133,20 @@ def _prepared_dataset(
     df_features: pd.DataFrame,
     horizon_candles: int = 1,
     threshold_pct: float = 0.003,
+    feature_cols: list[str] | None = None,
 ) -> tuple[pd.DataFrame, pd.Series]:
     data = _feature_frame(df_features)
+    cols = feature_cols or FEATURE_COLS
     labels = build_labels(data, horizon_candles=horizon_candles, threshold_pct=threshold_pct)
-    valid = data[FEATURE_COLS].notna().all(axis=1) & labels.notna()
-    return data.loc[valid, FEATURE_COLS], labels.loc[valid].astype(int)
+    valid = data[cols].notna().all(axis=1) & labels.notna()
+    return data.loc[valid, cols], labels.loc[valid].astype(int)
 
 
 def walk_forward_accuracy(
     df_features: pd.DataFrame,
     n_splits: int = 5,
     horizon_candles: int = 1,
+    feature_cols: list[str] | None = None,
 ) -> float | None:
     """
     Calcula accuracy promedio con walk-forward cross-validation.
@@ -133,7 +154,7 @@ def walk_forward_accuracy(
     En cada fold: entrena en el pasado, valida en el futuro inmediato.
     Retorna accuracy promedio (float 0-1) o None si hay datos insuficientes.
     """
-    x, y = _prepared_dataset(df_features, horizon_candles=horizon_candles)
+    x, y = _prepared_dataset(df_features, horizon_candles=horizon_candles, feature_cols=feature_cols)
     if len(x) < max(60, n_splits * 20):
         return None
 
@@ -169,6 +190,7 @@ def xgboost_signal(
     horizon_minutes: int = 60,
     min_train_rows: int = 200,
     strategy_params: dict[str, Any] | None = None,
+    sentiment_features: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """
     Función principal. Recibe un DataFrame con OHLCV, retorna un dict con:
@@ -197,7 +219,8 @@ def xgboost_signal(
     buy_threshold = float(strategy_params.get("probability_buy_threshold", 0.58))
     sell_threshold = float(strategy_params.get("probability_sell_threshold", 0.42))
 
-    data = _feature_frame(df)
+    data = _apply_sentiment_features(_feature_frame(df), sentiment_features)
+    feature_cols = _feature_cols(sentiment_features)
     if len(data) < 2:
         return {
             "model_available": False,
@@ -210,8 +233,13 @@ def xgboost_signal(
             "reason": "insufficient_rows_for_closed_candle_prediction",
         }
 
-    x, y = _prepared_dataset(data.iloc[:-1], horizon_candles=horizon_candles, threshold_pct=threshold_pct)
-    prediction_row = data.iloc[-2][FEATURE_COLS]
+    x, y = _prepared_dataset(
+        data.iloc[:-1],
+        horizon_candles=horizon_candles,
+        threshold_pct=threshold_pct,
+        feature_cols=feature_cols,
+    )
+    prediction_row = data.iloc[-2][feature_cols]
     if prediction_row.isna().any():
         return {
             "model_available": False,
@@ -261,7 +289,7 @@ def xgboost_signal(
         signal = "HOLD"
 
     confidence = min(95.0, max(5.0, abs(probability - 0.5) * 200))
-    wf_accuracy = walk_forward_accuracy(data.iloc[:-1], horizon_candles=horizon_candles)
+    wf_accuracy = walk_forward_accuracy(data.iloc[:-1], horizon_candles=horizon_candles, feature_cols=feature_cols)
     return {
         "model_available": True,
         "probability_up": round(float(probability), 6),
@@ -271,4 +299,5 @@ def xgboost_signal(
         "walk_forward_accuracy": wf_accuracy,
         "train_rows": int(len(x_train)),
         "reason": "xgboost temporal split using iloc[-2] closed candle",
+        "sentiment_features": sentiment_features or {},
     }
