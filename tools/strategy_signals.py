@@ -10,8 +10,10 @@ from ta.momentum import RSIIndicator
 from ta.trend import EMAIndicator, MACD
 from ta.volatility import AverageTrueRange, BollingerBands
 
+from tools.ml_engine import xgboost_signal
 
-STRATEGY_MODES = {"deterministic", "model_based", "hybrid"}
+
+STRATEGY_MODES = {"deterministic", "model_based", "hybrid", "xgboost"}
 
 
 @dataclass
@@ -464,6 +466,60 @@ def hybrid_signal_from_df(
     )
 
 
+def xgboost_signal_from_df(
+    df: pd.DataFrame,
+    horizon_minutes: int = 60,
+    strategy_params: dict[str, Any] | None = None,
+) -> StrategySignal:
+    try:
+        features = add_features(df)
+        result = xgboost_signal(
+            features,
+            horizon_minutes=horizon_minutes,
+            strategy_params=strategy_params,
+        )
+    except ImportError as exc:
+        import logging
+
+        logging.getLogger(__name__).warning("XGBoost unavailable; falling back to model_based mode: %s", exc)
+        return model_based_signal_from_df(df, horizon_minutes=horizon_minutes, strategy_params=strategy_params)
+
+    row = features.iloc[-2] if len(features) >= 2 else features.iloc[-1]
+    price = float(row["close"])
+    min_rr = float((strategy_params or {}).get("min_risk_reward", 1.5))
+    atr_stop_multiplier = float((strategy_params or {}).get("atr_stop_multiplier", 1.5))
+    atr_take_profit_multiplier = (strategy_params or {}).get("atr_take_profit_multiplier")
+    atr_take_profit_multiplier = float(atr_take_profit_multiplier) if atr_take_profit_multiplier is not None else None
+    stop_loss, take_profit, rr = risk_levels(
+        price,
+        row.get("atr"),
+        result["signal"],
+        min_rr,
+        atr_stop_multiplier,
+        atr_take_profit_multiplier,
+    )
+    input_features = latest_feature_snapshot(row)
+    input_features.update(result)
+    input_features["prediction_row"] = "iloc[-2]"
+
+    return StrategySignal(
+        strategy_mode="xgboost",
+        strategy_name="xgboost_temporal_split",
+        strategy_version="v1",
+        signal=result["signal"],
+        confidence=result["confidence"],
+        entry_price=price,
+        stop_loss=stop_loss,
+        take_profit=take_profit,
+        risk_reward_ratio=rr,
+        horizon_minutes=horizon_minutes,
+        input_features=input_features,
+        reasoning=result["reason"],
+        model_provider="local_xgboost",
+        model_name="xgboost_classifier_v1",
+    )
+
+
 def generate_strategy_signal_from_df(
     df: pd.DataFrame,
     strategy_mode: str = "deterministic",
@@ -473,9 +529,11 @@ def generate_strategy_signal_from_df(
 ) -> StrategySignal:
     mode = strategy_mode.lower()
     if mode not in STRATEGY_MODES:
-        raise ValueError("strategy_mode must be deterministic, model_based, or hybrid")
+        raise ValueError("strategy_mode must be deterministic, model_based, hybrid, or xgboost")
     if mode == "deterministic":
         return deterministic_signal_from_df(df, horizon_minutes=horizon_minutes, strategy_params=strategy_params)
     if mode == "model_based":
         return model_based_signal_from_df(df, horizon_minutes=horizon_minutes, strategy_params=strategy_params)
+    if mode == "xgboost":
+        return xgboost_signal_from_df(df, horizon_minutes=horizon_minutes, strategy_params=strategy_params)
     return hybrid_signal_from_df(df, provider=provider, horizon_minutes=horizon_minutes, strategy_params=strategy_params)
