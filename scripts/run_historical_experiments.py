@@ -241,13 +241,20 @@ async def run_experiments(
     raw_runs: list[dict[str, Any]] = []
 
     strategy_params = {"use_sentiment": HISTORICAL_SENTIMENT_USED}
-    if use_trade_labels:
-        strategy_params["use_trade_labels"] = True
 
     for symbol in symbols:
         for timeframe in timeframes:
             replay_horizon_candles = horizon_candles_for_interval(horizon_minutes, timeframe)
             replay_horizon_minutes = effective_horizon_minutes(horizon_minutes, timeframe)
+            run_strategy_params = dict(strategy_params)
+            if use_trade_labels:
+                run_strategy_params.update({
+                    "use_trade_labels": True,
+                    "horizon_candles": replay_horizon_candles,
+                    "commission_pct": 0.001,
+                    "slippage_pct": 0.0005,
+                    "spread_pct": 0.0003,
+                })
             if replay_horizon_minutes != horizon_minutes:
                 print(
                     f"WARNING: {timeframe} requested_horizon_minutes={horizon_minutes} "
@@ -283,7 +290,7 @@ async def run_experiments(
                         horizon_candles=replay_horizon_candles,
                         horizon_minutes=replay_horizon_minutes,
                         max_predictions=max_predictions,
-                        strategy_params=strategy_params,
+                        strategy_params=run_strategy_params,
                         store=store,
                     )
                     summaries.append(

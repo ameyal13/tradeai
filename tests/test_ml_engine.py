@@ -53,7 +53,32 @@ class MLEngineTests(unittest.TestCase):
         valid = labels.dropna()
 
         self.assertGreater(len(valid), 0)
-        self.assertTrue(set(valid.unique()).issubset({0.0, 1.0}))
+        self.assertEqual(set(labels.columns), {"buy_win", "sell_win"})
+        self.assertTrue(set(valid["buy_win"].unique()).issubset({0.0, 1.0}))
+        self.assertTrue(set(valid["sell_win"].unique()).issubset({0.0, 1.0}))
+
+    def test_buy_loss_does_not_automatically_mark_sell_win(self):
+        idx = pd.date_range("2026-01-01", periods=3, freq="h", tz="UTC")
+        df = pd.DataFrame({
+            "timestamp": idx,
+            "open": [100, 100, 100],
+            "high": [100, 101, 100],
+            "low": [100, 98, 100],
+            "close": [100, 99, 100],
+            "volume": [1000, 1000, 1000],
+        })
+        labels = build_trade_outcome_labels(
+            df,
+            horizon_candles=1,
+            stop_loss_pct=0.01,
+            take_profit_pct=0.05,
+            commission_pct=0,
+            slippage_pct=0,
+            spread_pct=0,
+        )
+
+        self.assertEqual(labels.iloc[0]["buy_win"], 0)
+        self.assertEqual(labels.iloc[0]["sell_win"], 0)
 
     def test_xgboost_signal_with_trade_labels_trains(self):
         features = add_features(sample_candles(300))
@@ -71,7 +96,9 @@ class MLEngineTests(unittest.TestCase):
         )
 
         self.assertTrue(result["model_available"])
-        self.assertEqual(result["label_type"], "trade_outcome")
+        self.assertEqual(result["label_type"], "trade_outcome_directional")
+        self.assertIn("probability_buy_win", result)
+        self.assertIn("probability_sell_win", result)
         self.assertIn(result["signal"], {"BUY", "SELL", "HOLD"})
 
     def test_xgboost_signal_reports_price_return_label_type(self):
@@ -79,6 +106,33 @@ class MLEngineTests(unittest.TestCase):
         result = xgboost_signal(features, min_train_rows=30, strategy_params={"use_trade_labels": False})
 
         self.assertEqual(result["label_type"], "price_return")
+
+    def test_xgboost_input_features_include_label_params(self):
+        result = {
+            "model_available": True,
+            "probability_up": 0.6,
+            "probability_buy_win": 0.6,
+            "probability_sell_win": 0.3,
+            "signal": "BUY",
+            "confidence": 60,
+            "validation_accuracy": 0.5,
+            "walk_forward_accuracy": None,
+            "train_rows": 200,
+            "reason": "mock",
+            "sentiment_features": {},
+            "label_type": "trade_outcome_directional",
+            "label_stop_loss_pct": 0.03,
+            "label_take_profit_pct": 0.045,
+            "label_horizon_candles": 4,
+            "label_costs": {"commission_pct": 0.001, "slippage_pct": 0.0005, "spread_pct": 0.0003},
+            "label_level_note": "fixed_pct_trade_labels_not_atr",
+        }
+        with patch("tools.strategy_signals.xgboost_signal", return_value=result):
+            signal = xgboost_signal_from_df(sample_candles(300), use_sentiment=False).to_dict()
+
+        self.assertEqual(signal["input_features"]["label_type"], "trade_outcome_directional")
+        self.assertEqual(signal["input_features"]["label_horizon_candles"], 4)
+        self.assertEqual(signal["input_features"]["label_costs"]["spread_pct"], 0.0003)
 
     def test_xgboost_signal_no_lookahead(self):
         """La predicción debe usar iloc[-2], nunca la última fila abierta"""

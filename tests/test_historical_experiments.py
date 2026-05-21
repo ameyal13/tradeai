@@ -318,7 +318,14 @@ class HistoricalExperimentTests(unittest.IsolatedAsyncioTestCase):
                         use_trade_labels=True,
                     )
 
-        self.assertEqual(replay.call_args.kwargs["strategy_params"], {"use_sentiment": False, "use_trade_labels": True})
+        self.assertEqual(replay.call_args.kwargs["strategy_params"], {
+            "use_sentiment": False,
+            "use_trade_labels": True,
+            "horizon_candles": 4,
+            "commission_pct": 0.001,
+            "slippage_pct": 0.0005,
+            "spread_pct": 0.0003,
+        })
         self.assertTrue(report["config"]["use_trade_labels"])
         self.assertTrue(report["runs"][0]["use_trade_labels"])
 
