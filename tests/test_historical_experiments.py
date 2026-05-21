@@ -298,6 +298,30 @@ class HistoricalExperimentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(kwargs["strategy_params"], {"use_sentiment": False})
         self.assertEqual(report["runs"][0]["effective_horizon_minutes"], 960)
 
+    async def test_use_trade_labels_flag_passes_strategy_param(self):
+        import scripts.run_historical_experiments as script
+
+        replay_result = {
+            "predictions": [],
+            "outcomes": [],
+            "metrics": [],
+            "assumptions": {},
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.object(script, "fetch_binance_klines", new=AsyncMock(return_value=synthetic_candles())):
+                with patch.object(script, "run_historical_replay", return_value=replay_result) as replay:
+                    report = await script.run_experiments(
+                        symbols=["BTC"],
+                        timeframes=["1h"],
+                        strategy_modes=["xgboost"],
+                        reports_dir=tmp,
+                        use_trade_labels=True,
+                    )
+
+        self.assertEqual(replay.call_args.kwargs["strategy_params"], {"use_sentiment": False, "use_trade_labels": True})
+        self.assertTrue(report["config"]["use_trade_labels"])
+        self.assertTrue(report["runs"][0]["use_trade_labels"])
+
     async def test_historical_report_includes_sentiment_disabled_note(self):
         import scripts.run_historical_experiments as script
 

@@ -233,11 +233,16 @@ async def run_experiments(
     max_predictions: int = DEFAULT_MAX_PREDICTIONS,
     persist: bool = False,
     reports_dir: str | Path = "reports",
+    use_trade_labels: bool = False,
 ) -> dict[str, Any]:
     strategy_modes = validate_strategy_modes(strategy_modes)
     store = PredictionStore() if persist else None
     summaries: list[dict[str, Any]] = []
     raw_runs: list[dict[str, Any]] = []
+
+    strategy_params = {"use_sentiment": HISTORICAL_SENTIMENT_USED}
+    if use_trade_labels:
+        strategy_params["use_trade_labels"] = True
 
     for symbol in symbols:
         for timeframe in timeframes:
@@ -278,7 +283,7 @@ async def run_experiments(
                         horizon_candles=replay_horizon_candles,
                         horizon_minutes=replay_horizon_minutes,
                         max_predictions=max_predictions,
-                        strategy_params={"use_sentiment": HISTORICAL_SENTIMENT_USED},
+                        strategy_params=strategy_params,
                         store=store,
                     )
                     summaries.append(
@@ -301,6 +306,7 @@ async def run_experiments(
                         "evaluation_horizon_candles": replay_horizon_candles,
                         "sentiment_used": HISTORICAL_SENTIMENT_USED,
                         "sentiment_note": HISTORICAL_SENTIMENT_NOTE,
+                        "use_trade_labels": use_trade_labels,
                         "assumptions": result.get("assumptions", {}),
                         "metrics": result.get("metrics", []),
                     })
@@ -329,6 +335,7 @@ async def run_experiments(
             "evaluation_horizon_note": "1h and 4h runs use at least 4 future candles so TP/SL has time to resolve.",
             "sentiment_used": HISTORICAL_SENTIMENT_USED,
             "sentiment_note": HISTORICAL_SENTIMENT_NOTE,
+            "use_trade_labels": use_trade_labels,
             "persist": persist,
         },
         "summary": summaries,
@@ -400,6 +407,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-predictions", type=int, default=DEFAULT_MAX_PREDICTIONS)
     parser.add_argument("--horizon-minutes", type=int, default=DEFAULT_HORIZON_MINUTES)
     parser.add_argument("--persist", action="store_true")
+    parser.add_argument("--use-trade-labels", action="store_true")
     return parser
 
 
@@ -413,6 +421,7 @@ async def main() -> None:
         max_candles=args.max_candles,
         max_predictions=args.max_predictions,
         persist=args.persist,
+        use_trade_labels=args.use_trade_labels,
     )
     print_summary(report["summary"])
     print(f"JSON report: {report['report_paths']['json']}")

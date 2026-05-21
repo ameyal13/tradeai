@@ -4,7 +4,7 @@ from unittest.mock import patch
 import numpy as np
 import pandas as pd
 
-from tools.ml_engine import walk_forward_accuracy, xgboost_signal
+from tools.ml_engine import build_trade_outcome_labels, walk_forward_accuracy, xgboost_signal
 from tools.strategy_signals import add_features, generate_strategy_signal_from_df, xgboost_signal_from_df
 
 
@@ -40,6 +40,45 @@ class MLEngineTests(unittest.TestCase):
         self.assertIsNotNone(result["probability_up"])
         self.assertGreaterEqual(result["confidence"], 0)
         self.assertLessEqual(result["confidence"], 100)
+
+    def test_build_trade_outcome_labels_returns_binary_valid_labels(self):
+        labels = build_trade_outcome_labels(
+            sample_candles(260),
+            horizon_candles=4,
+            stop_loss_pct=0.01,
+            take_profit_pct=0.01,
+            commission_pct=0,
+            slippage_pct=0,
+        )
+        valid = labels.dropna()
+
+        self.assertGreater(len(valid), 0)
+        self.assertTrue(set(valid.unique()).issubset({0.0, 1.0}))
+
+    def test_xgboost_signal_with_trade_labels_trains(self):
+        features = add_features(sample_candles(300))
+        result = xgboost_signal(
+            features,
+            min_train_rows=30,
+            strategy_params={
+                "use_trade_labels": True,
+                "horizon_candles": 4,
+                "stop_loss_pct": 0.01,
+                "take_profit_pct": 0.01,
+                "commission_pct": 0,
+                "slippage_pct": 0,
+            },
+        )
+
+        self.assertTrue(result["model_available"])
+        self.assertEqual(result["label_type"], "trade_outcome")
+        self.assertIn(result["signal"], {"BUY", "SELL", "HOLD"})
+
+    def test_xgboost_signal_reports_price_return_label_type(self):
+        features = add_features(sample_candles(300))
+        result = xgboost_signal(features, min_train_rows=30, strategy_params={"use_trade_labels": False})
+
+        self.assertEqual(result["label_type"], "price_return")
 
     def test_xgboost_signal_no_lookahead(self):
         """La predicción debe usar iloc[-2], nunca la última fila abierta"""

@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 
 from tools.sentiment_engine import fear_greed_to_feature
+from tools.trade_labels import label_trade_at_index
 
 
 FEATURE_COLS = [
@@ -77,6 +78,33 @@ def build_labels(df: pd.DataFrame, horizon_candles: int = 1, threshold_pct: floa
     return labels
 
 
+def build_trade_outcome_labels(
+    df: pd.DataFrame,
+    horizon_candles: int,
+    stop_loss_pct: float,
+    take_profit_pct: float,
+    commission_pct: float,
+    slippage_pct: float,
+) -> pd.Series:
+    labels = pd.Series(np.nan, index=df.index, dtype=float)
+    for index_n in range(len(df)):
+        label = label_trade_at_index(
+            df,
+            index_n,
+            side="BUY",
+            horizon_candles=horizon_candles,
+            stop_loss_pct=stop_loss_pct,
+            take_profit_pct=take_profit_pct,
+            commission_pct=commission_pct,
+            slippage_pct=slippage_pct,
+        )
+        if label.get("outcome") == "WIN":
+            labels.iloc[index_n] = 1.0
+        elif label.get("outcome") == "LOSS":
+            labels.iloc[index_n] = 0.0
+    return labels
+
+
 def train_xgboost_model(
     x_train: np.ndarray,
     y_train: np.ndarray,
@@ -134,10 +162,11 @@ def _prepared_dataset(
     horizon_candles: int = 1,
     threshold_pct: float = 0.003,
     feature_cols: list[str] | None = None,
+    labels: pd.Series | None = None,
 ) -> tuple[pd.DataFrame, pd.Series]:
     data = _feature_frame(df_features)
     cols = feature_cols or FEATURE_COLS
-    labels = build_labels(data, horizon_candles=horizon_candles, threshold_pct=threshold_pct)
+    labels = labels if labels is not None else build_labels(data, horizon_candles=horizon_candles, threshold_pct=threshold_pct)
     valid = data[cols].notna().all(axis=1) & labels.notna()
     return data.loc[valid, cols], labels.loc[valid].astype(int)
 
@@ -218,6 +247,8 @@ def xgboost_signal(
     horizon_candles = int(strategy_params.get("horizon_candles", 1))
     buy_threshold = float(strategy_params.get("probability_buy_threshold", 0.58))
     sell_threshold = float(strategy_params.get("probability_sell_threshold", 0.42))
+    use_trade_labels = bool(strategy_params.get("use_trade_labels", False))
+    label_type = "trade_outcome" if use_trade_labels else "price_return"
 
     data = _apply_sentiment_features(_feature_frame(df), sentiment_features)
     feature_cols = _feature_cols(sentiment_features)
@@ -231,13 +262,26 @@ def xgboost_signal(
             "walk_forward_accuracy": None,
             "train_rows": 0,
             "reason": "insufficient_rows_for_closed_candle_prediction",
+            "label_type": label_type,
         }
+
+    labels = None
+    if use_trade_labels:
+        labels = build_trade_outcome_labels(
+            data.iloc[:-1],
+            horizon_candles=horizon_candles,
+            stop_loss_pct=float(strategy_params.get("stop_loss_pct", 0.03)),
+            take_profit_pct=float(strategy_params.get("take_profit_pct", 0.045)),
+            commission_pct=float(strategy_params.get("commission_pct", 0.001)),
+            slippage_pct=float(strategy_params.get("slippage_pct", 0.0005)),
+        )
 
     x, y = _prepared_dataset(
         data.iloc[:-1],
         horizon_candles=horizon_candles,
         threshold_pct=threshold_pct,
         feature_cols=feature_cols,
+        labels=labels,
     )
     prediction_row = data.iloc[-2][feature_cols]
     if prediction_row.isna().any():
@@ -250,6 +294,7 @@ def xgboost_signal(
             "walk_forward_accuracy": None,
             "train_rows": len(x),
             "reason": "prediction_row_features_incomplete",
+            "label_type": label_type,
         }
     if len(x) < min_train_rows:
         return {
@@ -261,6 +306,7 @@ def xgboost_signal(
             "walk_forward_accuracy": None,
             "train_rows": len(x),
             "reason": "insufficient_training_rows",
+            "label_type": label_type,
         }
 
     split = max(1, int(len(x) * 0.7))
@@ -300,4 +346,5 @@ def xgboost_signal(
         "train_rows": int(len(x_train)),
         "reason": "xgboost temporal split using iloc[-2] closed candle",
         "sentiment_features": sentiment_features or {},
+        "label_type": label_type,
     }
