@@ -1,4 +1,5 @@
 import unittest
+import time
 from unittest.mock import patch
 
 import numpy as np
@@ -6,6 +7,7 @@ import pandas as pd
 
 from tools.ml_engine import build_trade_outcome_labels, walk_forward_accuracy, xgboost_signal
 from tools.strategy_signals import add_features, generate_strategy_signal_from_df, xgboost_signal_from_df
+from tools.trade_labels import label_trade_at_index
 
 
 def sample_candles(rows=300):
@@ -79,6 +81,133 @@ class MLEngineTests(unittest.TestCase):
 
         self.assertEqual(labels.iloc[0]["buy_win"], 0)
         self.assertEqual(labels.iloc[0]["sell_win"], 0)
+
+    def test_fast_trade_labels_match_reference_for_buy_and_sell(self):
+        df = sample_candles(40)
+        labels = build_trade_outcome_labels(
+            df,
+            horizon_candles=4,
+            stop_loss_pct=0.01,
+            take_profit_pct=0.015,
+            commission_pct=0.001,
+            slippage_pct=0.0005,
+            spread_pct=0.0003,
+        )
+
+        for index_n in [0, 5, 10, 20]:
+            buy_reference = label_trade_at_index(
+                df, index_n, "BUY", 4,
+                stop_loss_pct=0.01,
+                take_profit_pct=0.015,
+                commission_pct=0.001,
+                slippage_pct=0.0005,
+                spread_pct=0.0003,
+            )
+            sell_reference = label_trade_at_index(
+                df, index_n, "SELL", 4,
+                stop_loss_pct=0.01,
+                take_profit_pct=0.015,
+                commission_pct=0.001,
+                slippage_pct=0.0005,
+                spread_pct=0.0003,
+            )
+            expected_buy = 1.0 if buy_reference["outcome"] == "WIN" else 0.0 if buy_reference["outcome"] == "LOSS" else np.nan
+            expected_sell = 1.0 if sell_reference["outcome"] == "WIN" else 0.0 if sell_reference["outcome"] == "LOSS" else np.nan
+
+            if np.isnan(expected_buy):
+                self.assertTrue(np.isnan(labels.iloc[index_n]["buy_win"]))
+            else:
+                self.assertEqual(labels.iloc[index_n]["buy_win"], expected_buy)
+            if np.isnan(expected_sell):
+                self.assertTrue(np.isnan(labels.iloc[index_n]["sell_win"]))
+            else:
+                self.assertEqual(labels.iloc[index_n]["sell_win"], expected_sell)
+
+    def test_ambiguous_same_candle_tp_sl_is_loss(self):
+        idx = pd.date_range("2026-01-01", periods=3, freq="h", tz="UTC")
+        df = pd.DataFrame({
+            "timestamp": idx,
+            "open": [100, 100, 100],
+            "high": [100, 106, 100],
+            "low": [100, 94, 100],
+            "close": [100, 100, 100],
+            "volume": [1000, 1000, 1000],
+        })
+        labels = build_trade_outcome_labels(
+            df,
+            horizon_candles=1,
+            stop_loss_pct=0.05,
+            take_profit_pct=0.05,
+            commission_pct=0,
+            slippage_pct=0,
+            spread_pct=0,
+        )
+
+        self.assertEqual(labels.iloc[0]["buy_win"], 0.0)
+        self.assertEqual(labels.iloc[0]["sell_win"], 0.0)
+
+    def test_expired_trade_label_stays_nan(self):
+        idx = pd.date_range("2026-01-01", periods=3, freq="h", tz="UTC")
+        df = pd.DataFrame({
+            "timestamp": idx,
+            "open": [100, 100, 100],
+            "high": [100, 101, 101],
+            "low": [100, 99, 99],
+            "close": [100, 100, 100],
+            "volume": [1000, 1000, 1000],
+        })
+        labels = build_trade_outcome_labels(
+            df,
+            horizon_candles=1,
+            stop_loss_pct=0.05,
+            take_profit_pct=0.05,
+            commission_pct=0,
+            slippage_pct=0,
+            spread_pct=0,
+        )
+
+        self.assertTrue(np.isnan(labels.iloc[0]["buy_win"]))
+        self.assertTrue(np.isnan(labels.iloc[0]["sell_win"]))
+
+    def test_trade_labels_values_are_only_binary_or_nan(self):
+        labels = build_trade_outcome_labels(
+            sample_candles(120),
+            horizon_candles=4,
+            stop_loss_pct=0.01,
+            take_profit_pct=0.015,
+            commission_pct=0.001,
+            slippage_pct=0.0005,
+        )
+        values = labels.to_numpy().ravel()
+        valid_values = {value for value in values if not np.isnan(value)}
+
+        self.assertTrue(valid_values.issubset({0.0, 1.0}))
+
+    def test_trade_label_builder_benchmark_500_rows_under_one_second(self):
+        idx = pd.date_range("2023-01-01", periods=500, freq="15min", tz="UTC")
+        rng = np.random.default_rng(42)
+        base = 100 + np.cumsum(rng.normal(0, 0.1, 500))
+        df = pd.DataFrame({
+            "timestamp": idx,
+            "open": base,
+            "high": base + 0.5,
+            "low": base - 0.5,
+            "close": base,
+            "volume": 1000.0,
+        })
+        started = time.perf_counter()
+        labels = build_trade_outcome_labels(
+            df,
+            horizon_candles=4,
+            stop_loss_pct=0.02,
+            take_profit_pct=0.03,
+            commission_pct=0.001,
+            slippage_pct=0.0005,
+        )
+        elapsed = time.perf_counter() - started
+
+        self.assertEqual(len(labels), 500)
+        self.assertLess(elapsed, 1.0)
 
     def test_xgboost_signal_with_trade_labels_trains(self):
         features = add_features(sample_candles(300))

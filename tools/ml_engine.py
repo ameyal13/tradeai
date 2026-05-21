@@ -11,8 +11,6 @@ import numpy as np
 import pandas as pd
 
 from tools.sentiment_engine import fear_greed_to_feature
-from tools.trade_labels import label_trade_at_index
-
 
 FEATURE_COLS = [
     "rsi", "macd_hist", "ema_fast", "ema_slow",
@@ -87,28 +85,73 @@ def build_trade_outcome_labels(
     slippage_pct: float,
     spread_pct: float = 0.0003,
 ) -> pd.DataFrame:
-    labels = pd.DataFrame(index=df.index, data={
-        "buy_win": np.nan,
-        "sell_win": np.nan,
-    })
-    for index_n in range(len(df)):
-        for side, column in [("BUY", "buy_win"), ("SELL", "sell_win")]:
-            label = label_trade_at_index(
-                df,
-                index_n,
-                side=side,
-                horizon_candles=horizon_candles,
-                stop_loss_pct=stop_loss_pct,
-                take_profit_pct=take_profit_pct,
-                commission_pct=commission_pct,
-                slippage_pct=slippage_pct,
-                spread_pct=spread_pct,
-            )
-            if label.get("outcome") == "WIN":
-                labels.at[labels.index[index_n], column] = 1.0
-            elif label.get("outcome") == "LOSS":
-                labels.at[labels.index[index_n], column] = 0.0
-    return labels
+    """Fast directional trade labels equivalent to TP/SL touch outcomes.
+
+    Costs stay in the signature for experiment metadata parity, but this
+    primary directional label is based on TP/SL touches. EXPIRED, BREAKEVEN,
+    and INVALID_DATA remain NaN.
+    """
+    if horizon_candles <= 0:
+        return pd.DataFrame(index=df.index, data={"buy_win": np.nan, "sell_win": np.nan})
+
+    data = df.copy()
+    if "timestamp" in data.columns:
+        data["timestamp"] = pd.to_datetime(data["timestamp"], utc=True)
+    for column in ["open", "high", "low", "close"]:
+        if column not in data.columns:
+            raise ValueError(f"Missing required OHLC column: {column}")
+        data[column] = data[column].astype(float)
+
+    open_prices = data["open"].to_numpy(dtype=float)
+    highs = data["high"].to_numpy(dtype=float)
+    lows = data["low"].to_numpy(dtype=float)
+    buy_labels = np.full(len(data), np.nan, dtype=float)
+    sell_labels = np.full(len(data), np.nan, dtype=float)
+
+    for index_n in range(len(data)):
+        entry_idx = index_n + 1
+        if entry_idx >= len(data):
+            continue
+        end_idx = min(len(data), entry_idx + horizon_candles)
+        if end_idx <= entry_idx:
+            continue
+
+        entry = open_prices[entry_idx]
+        buy_sl = entry * (1 - stop_loss_pct)
+        buy_tp = entry * (1 + take_profit_pct)
+        sell_sl = entry * (1 + stop_loss_pct)
+        sell_tp = entry * (1 - take_profit_pct)
+
+        path_highs = highs[entry_idx:end_idx]
+        path_lows = lows[entry_idx:end_idx]
+
+        for high, low in zip(path_highs, path_lows):
+            buy_hit_sl = low <= buy_sl
+            buy_hit_tp = high >= buy_tp
+            if buy_hit_sl and buy_hit_tp:
+                buy_labels[index_n] = 0.0
+                break
+            if buy_hit_sl:
+                buy_labels[index_n] = 0.0
+                break
+            if buy_hit_tp:
+                buy_labels[index_n] = 1.0
+                break
+
+        for high, low in zip(path_highs, path_lows):
+            sell_hit_sl = high >= sell_sl
+            sell_hit_tp = low <= sell_tp
+            if sell_hit_sl and sell_hit_tp:
+                sell_labels[index_n] = 0.0
+                break
+            if sell_hit_sl:
+                sell_labels[index_n] = 0.0
+                break
+            if sell_hit_tp:
+                sell_labels[index_n] = 1.0
+                break
+
+    return pd.DataFrame(index=df.index, data={"buy_win": buy_labels, "sell_win": sell_labels})
 
 
 def train_xgboost_model(
@@ -288,7 +331,7 @@ def xgboost_signal(
             "slippage_pct": label_slippage_pct,
             "spread_pct": label_spread_pct,
         } if use_trade_labels else None,
-        "label_level_note": "fixed_pct_trade_labels_not_atr" if use_trade_labels else None,
+        "label_level_note": "fixed_pct_trade_labels_not_atr; costs_recorded_but_primary_label_is_tp_sl_touch" if use_trade_labels else None,
     }
 
     data = _apply_sentiment_features(_feature_frame(df), sentiment_features)
