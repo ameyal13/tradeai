@@ -238,6 +238,29 @@ def _prepared_trade_dataset(
     )
 
 
+def _prepared_directional_trade_dataset(
+    df_features: pd.DataFrame,
+    trade_labels: pd.DataFrame,
+    feature_cols: list[str],
+    label_col: str,
+) -> tuple[pd.DataFrame, pd.Series]:
+    data = _feature_frame(df_features)
+    valid = data[feature_cols].notna().all(axis=1) & trade_labels[label_col].notna()
+    return data.loc[valid, feature_cols], trade_labels.loc[valid, label_col].astype(int)
+
+
+def _positive_count(labels: pd.Series | None) -> int:
+    if labels is None or len(labels) == 0:
+        return 0
+    return int((labels == 1).sum())
+
+
+def _positive_rate(labels: pd.Series | None) -> float | None:
+    if labels is None or len(labels) == 0:
+        return None
+    return round(_positive_count(labels) / len(labels), 6)
+
+
 def walk_forward_accuracy(
     df_features: pd.DataFrame,
     n_splits: int = 5,
@@ -316,6 +339,8 @@ def xgboost_signal(
     sell_threshold = float(strategy_params.get("probability_sell_threshold", 0.42))
     use_trade_labels = bool(strategy_params.get("use_trade_labels", False))
     label_type = "trade_outcome_directional" if use_trade_labels else "price_return"
+    buy_win_threshold = float(strategy_params.get("buy_win_threshold", buy_threshold))
+    sell_win_threshold = float(strategy_params.get("sell_win_threshold", 1 - sell_threshold))
     label_stop_loss_pct = float(strategy_params.get("stop_loss_pct", 0.03))
     label_take_profit_pct = float(strategy_params.get("take_profit_pct", 0.045))
     label_commission_pct = float(strategy_params.get("commission_pct", 0.001))
@@ -333,6 +358,20 @@ def xgboost_signal(
         } if use_trade_labels else None,
         "label_level_note": "fixed_pct_trade_labels_not_atr; costs_recorded_but_primary_label_is_tp_sl_touch" if use_trade_labels else None,
     }
+    trade_diag = {
+        "buy_label_count": 0,
+        "sell_label_count": 0,
+        "buy_positive_count": 0,
+        "sell_positive_count": 0,
+        "buy_positive_rate": None,
+        "sell_positive_rate": None,
+        "probability_buy_win": None,
+        "probability_sell_win": None,
+        "buy_threshold": buy_win_threshold if use_trade_labels else buy_threshold,
+        "sell_threshold": sell_win_threshold if use_trade_labels else sell_threshold,
+        "decision_margin": None,
+        "hold_reason": None,
+    } if use_trade_labels else {}
 
     data = _apply_sentiment_features(_feature_frame(df), sentiment_features)
     feature_cols = _feature_cols(sentiment_features)
@@ -347,6 +386,8 @@ def xgboost_signal(
             "train_rows": 0,
             "reason": "insufficient_rows_for_closed_candle_prediction",
             "label_type": label_type,
+            **trade_diag,
+            "hold_reason": "model_unavailable" if use_trade_labels else None,
             **label_params,
         }
 
@@ -360,8 +401,18 @@ def xgboost_signal(
             slippage_pct=label_slippage_pct,
             spread_pct=label_spread_pct,
         )
-        x, buy_y, sell_y = _prepared_trade_dataset(data.iloc[:-1], trade_labels, feature_cols)
+        buy_x, buy_y = _prepared_directional_trade_dataset(data.iloc[:-1], trade_labels, feature_cols, "buy_win")
+        sell_x, sell_y = _prepared_directional_trade_dataset(data.iloc[:-1], trade_labels, feature_cols, "sell_win")
+        x = buy_x
         y = buy_y
+        trade_diag.update({
+            "buy_label_count": int(len(buy_y)),
+            "sell_label_count": int(len(sell_y)),
+            "buy_positive_count": _positive_count(buy_y),
+            "sell_positive_count": _positive_count(sell_y),
+            "buy_positive_rate": _positive_rate(buy_y),
+            "sell_positive_rate": _positive_rate(sell_y),
+        })
     else:
         x, y = _prepared_dataset(
             data.iloc[:-1],
@@ -381,6 +432,38 @@ def xgboost_signal(
             "train_rows": len(x),
             "reason": "prediction_row_features_incomplete",
             "label_type": label_type,
+            **trade_diag,
+            "hold_reason": "model_unavailable" if use_trade_labels else None,
+            **label_params,
+        }
+    if use_trade_labels and len(buy_y) < min_train_rows:
+        return {
+            "model_available": False,
+            "probability_up": None,
+            "signal": "HOLD",
+            "confidence": 25.0,
+            "validation_accuracy": None,
+            "walk_forward_accuracy": None,
+            "train_rows": int(len(buy_y)),
+            "reason": "insufficient_buy_labels",
+            "label_type": label_type,
+            **trade_diag,
+            "hold_reason": "insufficient_buy_labels",
+            **label_params,
+        }
+    if use_trade_labels and len(sell_y) < min_train_rows:
+        return {
+            "model_available": False,
+            "probability_up": None,
+            "signal": "HOLD",
+            "confidence": 25.0,
+            "validation_accuracy": None,
+            "walk_forward_accuracy": None,
+            "train_rows": int(len(sell_y)),
+            "reason": "insufficient_sell_labels",
+            "label_type": label_type,
+            **trade_diag,
+            "hold_reason": "insufficient_sell_labels",
             **label_params,
         }
     if len(x) < min_train_rows:
@@ -394,47 +477,73 @@ def xgboost_signal(
             "train_rows": len(x),
             "reason": "insufficient_training_rows",
             "label_type": label_type,
+            **trade_diag,
+            "hold_reason": "insufficient_train_rows" if use_trade_labels else None,
             **label_params,
         }
-
-    split = max(1, int(len(x) * 0.7))
-    if split >= len(x):
-        split = len(x) - 1
-    x_train = x.iloc[:split].to_numpy(dtype=float)
-    y_train = y.iloc[:split].to_numpy(dtype=int)
-    x_val = x.iloc[split:].to_numpy(dtype=float)
-    y_val = y.iloc[split:].to_numpy(dtype=int)
-    model = train_xgboost_model(x_train, y_train, x_val, y_val)
 
     validation_accuracy = None
     probability_sell_win = None
     if use_trade_labels:
-        sell_train_y = sell_y.iloc[:split].to_numpy(dtype=int)
-        sell_val_y = sell_y.iloc[split:].to_numpy(dtype=int)
-        sell_model = train_xgboost_model(x_train, sell_train_y, x_val, sell_val_y)
-        if len(x_val):
+        buy_split = max(1, int(len(buy_x) * 0.7))
+        sell_split = max(1, int(len(sell_x) * 0.7))
+        if buy_split >= len(buy_x):
+            buy_split = len(buy_x) - 1
+        if sell_split >= len(sell_x):
+            sell_split = len(sell_x) - 1
+        x_train = buy_x.iloc[:buy_split].to_numpy(dtype=float)
+        y_train = buy_y.iloc[:buy_split].to_numpy(dtype=int)
+        x_val = buy_x.iloc[buy_split:].to_numpy(dtype=float)
+        y_val = buy_y.iloc[buy_split:].to_numpy(dtype=int)
+        model = train_xgboost_model(x_train, y_train, x_val, y_val)
+        sell_train_x = sell_x.iloc[:sell_split].to_numpy(dtype=float)
+        sell_train_y = sell_y.iloc[:sell_split].to_numpy(dtype=int)
+        sell_val_x = sell_x.iloc[sell_split:].to_numpy(dtype=float)
+        sell_val_y = sell_y.iloc[sell_split:].to_numpy(dtype=int)
+        sell_model = train_xgboost_model(sell_train_x, sell_train_y, sell_val_x, sell_val_y)
+        if len(x_val) and len(sell_val_x):
             buy_probs = np.array([predict_proba_xgboost(model, row) for row in x_val])
-            sell_probs = np.array([predict_proba_xgboost(sell_model, row) for row in x_val])
-            buy_preds = (buy_probs >= buy_threshold).astype(int)
-            sell_preds = (sell_probs >= (1 - sell_threshold)).astype(int)
-            validation_accuracy = round(float(((buy_preds == y_val) & (sell_preds == sell_val_y)).mean()), 6)
+            sell_probs = np.array([predict_proba_xgboost(sell_model, row) for row in sell_val_x])
+            buy_preds = (buy_probs >= buy_win_threshold).astype(int)
+            sell_preds = (sell_probs >= sell_win_threshold).astype(int)
+            buy_accuracy = float((buy_preds == y_val).mean())
+            sell_accuracy = float((sell_preds == sell_val_y).mean())
+            validation_accuracy = round((buy_accuracy + sell_accuracy) / 2, 6)
         probability = predict_proba_xgboost(model, prediction_row.to_numpy(dtype=float))
         probability_sell_win = predict_proba_xgboost(sell_model, prediction_row.to_numpy(dtype=float))
-        if probability >= buy_threshold and probability >= probability_sell_win:
+        buy_edge = probability - buy_win_threshold
+        sell_edge = probability_sell_win - sell_win_threshold
+        decision_margin = max(buy_edge, sell_edge)
+        trade_diag.update({
+            "probability_buy_win": round(float(probability), 6),
+            "probability_sell_win": round(float(probability_sell_win), 6),
+            "decision_margin": round(float(decision_margin), 6),
+        })
+        if probability >= buy_win_threshold and buy_edge >= sell_edge:
             signal = "BUY"
             confidence = min(95.0, max(5.0, probability * 100))
-        elif probability_sell_win >= (1 - sell_threshold) and probability_sell_win > probability:
+        elif probability_sell_win >= sell_win_threshold and sell_edge > buy_edge:
             signal = "SELL"
             confidence = min(95.0, max(5.0, probability_sell_win * 100))
         else:
             signal = "HOLD"
             confidence = min(95.0, max(5.0, max(probability, probability_sell_win) * 100))
-    elif len(x_val):
-        probs = np.array([predict_proba_xgboost(model, row) for row in x_val])
-        preds = (probs >= 0.5).astype(int)
-        validation_accuracy = round(float((preds == y_val).mean()), 6)
-        if len(np.unique(y)) < 2:
-            validation_accuracy = 0.5
+            trade_diag["hold_reason"] = "probabilities_below_threshold" if probability < buy_win_threshold and probability_sell_win < sell_win_threshold else "no_directional_edge"
+    else:
+        split = max(1, int(len(x) * 0.7))
+        if split >= len(x):
+            split = len(x) - 1
+        x_train = x.iloc[:split].to_numpy(dtype=float)
+        y_train = y.iloc[:split].to_numpy(dtype=int)
+        x_val = x.iloc[split:].to_numpy(dtype=float)
+        y_val = y.iloc[split:].to_numpy(dtype=int)
+        model = train_xgboost_model(x_train, y_train, x_val, y_val)
+        if len(x_val):
+            probs = np.array([predict_proba_xgboost(model, row) for row in x_val])
+            preds = (probs >= 0.5).astype(int)
+            validation_accuracy = round(float((preds == y_val).mean()), 6)
+            if len(np.unique(y)) < 2:
+                validation_accuracy = 0.5
 
     if not use_trade_labels:
         probability = predict_proba_xgboost(model, prediction_row.to_numpy(dtype=float))
@@ -460,5 +569,6 @@ def xgboost_signal(
         "reason": "xgboost temporal split using iloc[-2] closed candle",
         "sentiment_features": sentiment_features or {},
         "label_type": label_type,
+        **trade_diag,
         **label_params,
     }

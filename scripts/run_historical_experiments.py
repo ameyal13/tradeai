@@ -99,6 +99,33 @@ def average_return(outcomes: list[dict[str, Any]]) -> float:
     return average(returns)
 
 
+def average_feature_value(feature_rows: list[dict[str, Any]], key: str) -> float:
+    values = [value for value in (safe_float(row.get(key)) for row in feature_rows) if value is not None]
+    return average(values)
+
+
+def max_feature_value(feature_rows: list[dict[str, Any]], key: str) -> float:
+    values = [value for value in (safe_float(row.get(key)) for row in feature_rows) if value is not None]
+    return round(max(values), 6) if values else 0
+
+
+def hold_reasons(feature_rows: list[dict[str, Any]]) -> dict[str, int]:
+    summary: dict[str, int] = {}
+    for row in feature_rows:
+        reason = row.get("hold_reason")
+        if reason:
+            summary[str(reason)] = summary.get(str(reason), 0) + 1
+    return summary
+
+
+def first_feature_value(feature_rows: list[dict[str, Any]], key: str) -> Any:
+    for row in feature_rows:
+        value = row.get(key)
+        if value is not None:
+            return value
+    return None
+
+
 def performance_for_predictions(predictions: list[dict[str, Any]], outcomes_by_prediction: dict[str, dict[str, Any]]) -> dict[str, Any]:
     rows = [outcomes_by_prediction[prediction["id"]] for prediction in predictions if prediction.get("id") in outcomes_by_prediction]
     return {
@@ -130,6 +157,7 @@ def diagnostic_metrics(result: dict[str, Any] | None) -> dict[str, Any]:
     predictions = (result or {}).get("predictions") or []
     outcomes = (result or {}).get("outcomes") or []
     outcomes_by_prediction = {outcome.get("prediction_id"): outcome for outcome in outcomes if outcome.get("prediction_id")}
+    feature_rows = [prediction.get("input_features") or {} for prediction in predictions]
 
     buy_predictions = [prediction for prediction in predictions if prediction.get("signal") == "BUY"]
     sell_predictions = [prediction for prediction in predictions if prediction.get("signal") == "SELL"]
@@ -175,6 +203,16 @@ def diagnostic_metrics(result: dict[str, Any] | None) -> dict[str, Any]:
         "sl_hit_count": sum(1 for outcome in outcomes if outcome.get("hit_stop_loss")),
         "expired_count": sum(1 for outcome in outcomes if outcome.get("outcome") == "EXPIRED"),
         "confidence_buckets": bucket_metrics,
+        "avg_probability_buy_win": average_feature_value(feature_rows, "probability_buy_win"),
+        "avg_probability_sell_win": average_feature_value(feature_rows, "probability_sell_win"),
+        "max_probability_buy_win": max_feature_value(feature_rows, "probability_buy_win"),
+        "max_probability_sell_win": max_feature_value(feature_rows, "probability_sell_win"),
+        "avg_buy_label_count": average_feature_value(feature_rows, "buy_label_count"),
+        "avg_sell_label_count": average_feature_value(feature_rows, "sell_label_count"),
+        "avg_buy_positive_rate": average_feature_value(feature_rows, "buy_positive_rate"),
+        "avg_sell_positive_rate": average_feature_value(feature_rows, "sell_positive_rate"),
+        "hold_reasons_summary": hold_reasons(feature_rows),
+        "label_type": first_feature_value(feature_rows, "label_type"),
     }
 
 
@@ -373,6 +411,11 @@ def write_report(report: dict[str, Any], reports_dir: str | Path = "reports") ->
         "sell_average_return", "avg_confidence", "avg_risk_reward",
         "avg_stop_distance_pct", "avg_take_profit_distance_pct",
         "tp_hit_count", "sl_hit_count", "expired_count",
+        "avg_probability_buy_win", "avg_probability_sell_win",
+        "max_probability_buy_win", "max_probability_sell_win",
+        "avg_buy_label_count", "avg_sell_label_count",
+        "avg_buy_positive_rate", "avg_sell_positive_rate",
+        "hold_reasons_summary", "label_type",
         "confidence_buckets", "warnings",
     ]
     with csv_path.open("w", newline="", encoding="utf-8") as handle:
@@ -381,6 +424,7 @@ def write_report(report: dict[str, Any], reports_dir: str | Path = "reports") ->
         for row in rows:
             csv_row = dict(row)
             csv_row["confidence_buckets"] = json.dumps(csv_row.get("confidence_buckets", {}), sort_keys=True)
+            csv_row["hold_reasons_summary"] = json.dumps(csv_row.get("hold_reasons_summary", {}), sort_keys=True)
             writer.writerow(csv_row)
     return {"json": str(json_path), "csv": str(csv_path)}
 
@@ -396,7 +440,12 @@ def print_summary(rows: list[dict[str, Any]]) -> None:
         "buy_win_rate", "sell_win_rate", "buy_average_return",
         "sell_average_return", "avg_confidence", "avg_risk_reward",
         "avg_stop_distance_pct", "avg_take_profit_distance_pct",
-        "tp_hit_count", "sl_hit_count", "expired_count", "warnings",
+        "tp_hit_count", "sl_hit_count", "expired_count",
+        "avg_probability_buy_win", "avg_probability_sell_win",
+        "max_probability_buy_win", "max_probability_sell_win",
+        "avg_buy_label_count", "avg_sell_label_count",
+        "avg_buy_positive_rate", "avg_sell_positive_rate",
+        "hold_reasons_summary", "label_type", "warnings",
     ]
     widths = {header: max(len(header), *(len(str(row.get(header, ""))) for row in rows)) for header in headers}
     print(" | ".join(header.ljust(widths[header]) for header in headers))

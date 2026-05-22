@@ -228,13 +228,49 @@ class MLEngineTests(unittest.TestCase):
         self.assertEqual(result["label_type"], "trade_outcome_directional")
         self.assertIn("probability_buy_win", result)
         self.assertIn("probability_sell_win", result)
+        self.assertIn("buy_label_count", result)
+        self.assertIn("sell_label_count", result)
+        self.assertIn("buy_positive_count", result)
+        self.assertIn("sell_positive_count", result)
+        self.assertIn("buy_positive_rate", result)
+        self.assertIn("sell_positive_rate", result)
+        self.assertIn("buy_threshold", result)
+        self.assertIn("sell_threshold", result)
+        self.assertIn("decision_margin", result)
+        self.assertIn("hold_reason", result)
         self.assertIn(result["signal"], {"BUY", "SELL", "HOLD"})
+
+    def test_xgboost_trade_label_hold_includes_hold_reason(self):
+        features = add_features(sample_candles(300))
+        result = xgboost_signal(
+            features,
+            min_train_rows=30,
+            strategy_params={
+                "use_trade_labels": True,
+                "horizon_candles": 4,
+                "stop_loss_pct": 0.01,
+                "take_profit_pct": 0.01,
+                "commission_pct": 0,
+                "slippage_pct": 0,
+                "buy_win_threshold": 1.1,
+                "sell_win_threshold": 1.1,
+            },
+        )
+
+        self.assertEqual(result["signal"], "HOLD")
+        self.assertIn(result["hold_reason"], {"probabilities_below_threshold", "no_directional_edge"})
 
     def test_xgboost_signal_reports_price_return_label_type(self):
         features = add_features(sample_candles(300))
         result = xgboost_signal(features, min_train_rows=30, strategy_params={"use_trade_labels": False})
 
         self.assertEqual(result["label_type"], "price_return")
+
+    def test_deterministic_mode_still_generates_signal(self):
+        signal = generate_strategy_signal_from_df(sample_candles(80), strategy_mode="deterministic").to_dict()
+
+        self.assertEqual(signal["strategy_mode"], "deterministic")
+        self.assertIn(signal["signal"], {"BUY", "SELL", "HOLD"})
 
     def test_xgboost_input_features_include_label_params(self):
         result = {

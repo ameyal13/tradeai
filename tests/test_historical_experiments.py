@@ -95,6 +95,48 @@ def diagnostic_result():
     }
 
 
+def xgboost_diagnostic_result():
+    return {
+        "predictions": [
+            {
+                "id": "xgb-hold-1",
+                "signal": "HOLD",
+                "confidence": 44,
+                "entry_price": 100,
+                "input_features": {
+                    "label_type": "trade_outcome_directional",
+                    "probability_buy_win": 0.41,
+                    "probability_sell_win": 0.38,
+                    "buy_label_count": 120,
+                    "sell_label_count": 118,
+                    "buy_positive_rate": 0.25,
+                    "sell_positive_rate": 0.2,
+                    "hold_reason": "probabilities_below_threshold",
+                },
+            },
+            {
+                "id": "xgb-hold-2",
+                "signal": "HOLD",
+                "confidence": 30,
+                "entry_price": 101,
+                "input_features": {
+                    "label_type": "trade_outcome_directional",
+                    "probability_buy_win": 0.35,
+                    "probability_sell_win": 0.33,
+                    "buy_label_count": 100,
+                    "sell_label_count": 98,
+                    "buy_positive_rate": 0.1,
+                    "sell_positive_rate": 0.12,
+                    "hold_reason": "insufficient_train_rows",
+                },
+            },
+        ],
+        "outcomes": [],
+        "metrics": [],
+        "assumptions": {},
+    }
+
+
 class HistoricalExperimentTests(unittest.IsolatedAsyncioTestCase):
     async def test_generates_report_with_synthetic_data(self):
         import scripts.run_historical_experiments as script
@@ -354,6 +396,21 @@ class HistoricalExperimentTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("requested_horizon_minutes", report["summary"][0])
         self.assertIn("effective_horizon_minutes", report["summary"][0])
         self.assertIn("evaluation_horizon_candles", report["summary"][0])
+
+    async def test_historical_report_aggregates_xgboost_diagnostics(self):
+        import scripts.run_historical_experiments as script
+
+        row = script.summarize_run("BTC", "1h", "xgboost", result=xgboost_diagnostic_result())
+
+        self.assertEqual(row["label_type"], "trade_outcome_directional")
+        self.assertEqual(row["hold_reasons_summary"], {
+            "probabilities_below_threshold": 1,
+            "insufficient_train_rows": 1,
+        })
+        self.assertEqual(row["avg_probability_buy_win"], 0.38)
+        self.assertEqual(row["max_probability_sell_win"], 0.38)
+        self.assertEqual(row["avg_buy_label_count"], 110)
+        self.assertEqual(row["avg_sell_positive_rate"], 0.16)
 
     async def test_requirements_does_not_include_unused_lightgbm(self):
         content = Path("requirements.txt").read_text(encoding="utf-8").lower()
