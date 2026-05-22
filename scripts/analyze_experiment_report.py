@@ -143,10 +143,11 @@ def classify_row(row: dict[str, Any]) -> str:
 def combo_name(row: dict[str, Any]) -> str:
     mode = row.get("strategy_mode") or "unknown"
     label = row.get("label_type") or "no_label"
+    scheme = row.get("trade_label_scheme") or "no_scheme"
     level = row.get("label_level_mode") or "no_level"
     horizon = row.get("label_horizon_candles") or row.get("evaluation_horizon_candles") or "?"
     trade = "trade_labels" if row.get("use_trade_labels") else "price_return_or_rules"
-    return f"{row.get('symbol')} {row.get('timeframe')} {mode} {trade} {label}/{level}/h{horizon}"
+    return f"{row.get('symbol')} {row.get('timeframe')} {mode} {trade} {label}/{scheme}/{level}/h{horizon}"
 
 
 def analyze_direction(row: dict[str, Any]) -> tuple[list[str], list[str]]:
@@ -289,8 +290,10 @@ def analyze_row(row: dict[str, Any]) -> dict[str, Any]:
         reasons.extend(extra_findings)
         recommendations.extend(extra_recommendations)
 
-    if row.get("label_type") == "trade_outcome_directional" and row.get("label_level_mode") == "atr":
+    if row.get("trade_label_scheme") == "touch_only" and row.get("label_level_mode") == "atr":
         recommendations.append("Current ATR trade labels may be too touch/expiry sensitive; test an expiry-aware target next.")
+    if row.get("trade_label_scheme") == "hybrid_touch_or_expiry":
+        recommendations.append("Hybrid expiry labels are experimental; compare against touch_only on the same window before trusting improvements.")
     recommendations.append("Do not declare edge from this aggregate report alone; use --save-trades for probability calibration.")
 
     deduped_recommendations = list(dict.fromkeys(recommendations))
