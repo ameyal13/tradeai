@@ -40,6 +40,14 @@ MIN_EVALUATION_CANDLES_BY_INTERVAL_MINUTES = {
 }
 
 
+def format_historical_data_error(exc: Exception) -> str:
+    exc_type = exc.__class__.__name__
+    status_code = getattr(getattr(exc, "response", None), "status_code", None)
+    if status_code is not None:
+        return f"historical_data_error: {exc_type}: HTTP {status_code}: {exc}"
+    return f"historical_data_error: {exc_type}: {exc}"
+
+
 def interval_to_minutes(interval: str) -> int:
     unit = interval[-1].lower()
     value = int(interval[:-1])
@@ -301,6 +309,59 @@ def diagnostic_metrics(result: dict[str, Any] | None) -> dict[str, Any]:
     }
 
 
+def flatten_trade_rows(
+    result: dict[str, Any],
+    symbol: str,
+    timeframe: str,
+    strategy_mode: str,
+    use_trade_labels: bool,
+    effective_horizon_minutes_value: int,
+    evaluation_horizon_candles: int,
+) -> list[dict[str, Any]]:
+    predictions = result.get("predictions") or []
+    outcomes_by_prediction = {
+        outcome.get("prediction_id"): outcome
+        for outcome in (result.get("outcomes") or [])
+        if outcome.get("prediction_id")
+    }
+    rows = []
+    for prediction in predictions:
+        features = prediction.get("input_features") or {}
+        outcome = outcomes_by_prediction.get(prediction.get("id"), {})
+        entry = safe_float(prediction.get("entry_price"))
+        stop_loss = safe_float(prediction.get("stop_loss"))
+        take_profit = safe_float(prediction.get("take_profit"))
+        outcome_name = outcome.get("outcome")
+        rows.append({
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "strategy_mode": strategy_mode,
+            "use_trade_labels": bool(use_trade_labels),
+            "label_type": features.get("label_type"),
+            "label_level_mode": features.get("label_level_mode"),
+            "label_horizon_candles": features.get("label_horizon_candles"),
+            "created_at": prediction.get("created_at"),
+            "signal": prediction.get("signal"),
+            "confidence": prediction.get("confidence"),
+            "probability_buy_win": features.get("probability_buy_win"),
+            "probability_sell_win": features.get("probability_sell_win"),
+            "entry_price": prediction.get("entry_price"),
+            "exit_price": outcome.get("exit_price"),
+            "outcome": outcome_name,
+            "return_pct": outcome.get("return_pct"),
+            "tp_hit": bool(outcome.get("hit_take_profit")),
+            "sl_hit": bool(outcome.get("hit_stop_loss")),
+            "expired": outcome_name == "EXPIRED",
+            "stop_distance_pct": abs(entry - stop_loss) / entry * 100 if entry and stop_loss is not None else None,
+            "take_profit_distance_pct": abs(take_profit - entry) / entry * 100 if entry and take_profit is not None else None,
+            "hold_reason": features.get("hold_reason"),
+            "risk_reward": prediction.get("risk_reward_ratio"),
+            "effective_horizon_minutes": effective_horizon_minutes_value,
+            "evaluation_horizon_candles": evaluation_horizon_candles,
+        })
+    return rows
+
+
 def summarize_run(
     symbol: str,
     timeframe: str,
@@ -359,11 +420,13 @@ async def run_experiments(
     persist: bool = False,
     reports_dir: str | Path = "reports",
     use_trade_labels: bool = False,
+    save_trades: bool = False,
 ) -> dict[str, Any]:
     strategy_modes = validate_strategy_modes(strategy_modes)
     store = PredictionStore() if persist else None
     summaries: list[dict[str, Any]] = []
     raw_runs: list[dict[str, Any]] = []
+    trade_rows: list[dict[str, Any]] = []
 
     strategy_params = {"use_sentiment": HISTORICAL_SENTIMENT_USED}
 
@@ -394,7 +457,7 @@ async def run_experiments(
             try:
                 candles = await fetch_binance_klines(symbol, timeframe, limit=max_candles)
             except Exception as exc:
-                error = f"historical_data_error: {exc}"
+                error = format_historical_data_error(exc)
                 for strategy_mode in strategy_modes:
                     summaries.append(
                         summarize_run(
@@ -455,6 +518,16 @@ async def run_experiments(
                         "assumptions": result.get("assumptions", {}),
                         "metrics": result.get("metrics", []),
                     })
+                    if save_trades:
+                        trade_rows.extend(flatten_trade_rows(
+                            result,
+                            symbol=symbol,
+                            timeframe=timeframe,
+                            strategy_mode=strategy_mode,
+                            use_trade_labels=use_trade_labels,
+                            effective_horizon_minutes_value=replay_horizon_minutes,
+                            evaluation_horizon_candles=replay_horizon_candles,
+                        ))
                 except Exception as exc:
                     summaries.append(
                         summarize_run(
@@ -483,22 +556,25 @@ async def run_experiments(
             "sentiment_note": HISTORICAL_SENTIMENT_NOTE,
             "use_trade_labels": use_trade_labels,
             "trade_label_min_train_rows": DEFAULT_TRADE_LABEL_MIN_TRAIN_ROWS if use_trade_labels else None,
+            "save_trades": save_trades,
             "persist": persist,
         },
         "summary": summaries,
         "runs": raw_runs,
+        "trades": trade_rows if save_trades else [],
     }
-    paths = write_report(report, reports_dir)
+    paths = write_report(report, reports_dir, save_trades=save_trades)
     report["report_paths"] = paths
     return report
 
 
-def write_report(report: dict[str, Any], reports_dir: str | Path = "reports") -> dict[str, str]:
+def write_report(report: dict[str, Any], reports_dir: str | Path = "reports", save_trades: bool = False) -> dict[str, str]:
     target = Path(reports_dir)
     target.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     json_path = target / f"historical_experiments_{stamp}.json"
     csv_path = target / f"historical_experiments_{stamp}.csv"
+    trades_path = target / f"historical_trades_{stamp}.csv"
     json_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
 
     rows = report["summary"]
@@ -538,7 +614,29 @@ def write_report(report: dict[str, Any], reports_dir: str | Path = "reports") ->
             csv_row["label_params"] = json.dumps(csv_row.get("label_params", {}), sort_keys=True)
             csv_row["use_trade_labels"] = "true" if csv_row.get("use_trade_labels") else "false"
             writer.writerow(csv_row)
-    return {"json": str(json_path), "csv": str(csv_path)}
+    paths = {"json": str(json_path), "csv": str(csv_path)}
+    if save_trades:
+        trade_fieldnames = [
+            "symbol", "timeframe", "strategy_mode", "use_trade_labels",
+            "label_type", "label_level_mode", "label_horizon_candles",
+            "created_at", "signal", "confidence", "probability_buy_win",
+            "probability_sell_win", "entry_price", "exit_price", "outcome",
+            "return_pct", "tp_hit", "sl_hit", "expired", "stop_distance_pct",
+            "take_profit_distance_pct", "hold_reason", "risk_reward",
+            "effective_horizon_minutes", "evaluation_horizon_candles",
+        ]
+        with trades_path.open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=trade_fieldnames)
+            writer.writeheader()
+            for row in report.get("trades", []):
+                csv_row = dict(row)
+                csv_row["use_trade_labels"] = "true" if csv_row.get("use_trade_labels") else "false"
+                csv_row["tp_hit"] = "true" if csv_row.get("tp_hit") else "false"
+                csv_row["sl_hit"] = "true" if csv_row.get("sl_hit") else "false"
+                csv_row["expired"] = "true" if csv_row.get("expired") else "false"
+                writer.writerow(csv_row)
+        paths["trades_csv"] = str(trades_path)
+    return paths
 
 
 def print_summary(rows: list[dict[str, Any]]) -> None:
@@ -580,6 +678,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--horizon-minutes", type=int, default=DEFAULT_HORIZON_MINUTES)
     parser.add_argument("--persist", action="store_true")
     parser.add_argument("--use-trade-labels", action="store_true")
+    parser.add_argument("--save-trades", action="store_true")
     return parser
 
 
@@ -594,10 +693,13 @@ async def main() -> None:
         max_predictions=args.max_predictions,
         persist=args.persist,
         use_trade_labels=args.use_trade_labels,
+        save_trades=args.save_trades,
     )
     print_summary(report["summary"])
     print(f"JSON report: {report['report_paths']['json']}")
     print(f"CSV report: {report['report_paths']['csv']}")
+    if "trades_csv" in report["report_paths"]:
+        print(f"Trades CSV: {report['report_paths']['trades_csv']}")
 
 
 if __name__ == "__main__":

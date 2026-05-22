@@ -428,6 +428,55 @@ class HistoricalExperimentTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("use_trade_labels", csv_text)
         self.assertIn("true", csv_text.lower())
 
+    async def test_save_trades_writes_optional_trade_csv(self):
+        import scripts.run_historical_experiments as script
+
+        replay_result = {
+            "predictions": [{
+                "id": "p1",
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "signal": "BUY",
+                "confidence": 70,
+                "entry_price": 100,
+                "stop_loss": 99,
+                "take_profit": 102,
+                "risk_reward_ratio": 2,
+                "input_features": {
+                    "label_type": "trade_outcome_directional",
+                    "label_level_mode": "atr",
+                    "label_horizon_candles": 4,
+                    "probability_buy_win": 0.7,
+                    "probability_sell_win": 0.2,
+                },
+            }],
+            "outcomes": [{
+                "prediction_id": "p1",
+                "exit_price": 102,
+                "outcome": "WIN",
+                "return_pct": 1.5,
+                "hit_take_profit": True,
+                "hit_stop_loss": False,
+            }],
+            "metrics": [{"evaluated_predictions": 1}],
+            "assumptions": {},
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.object(script, "fetch_binance_klines", new=AsyncMock(return_value=synthetic_candles())):
+                with patch.object(script, "run_historical_replay", return_value=replay_result):
+                    report = await script.run_experiments(
+                        symbols=["BTC"],
+                        timeframes=["15m"],
+                        strategy_modes=["xgboost"],
+                        reports_dir=tmp,
+                        save_trades=True,
+                    )
+
+            self.assertIn("trades_csv", report["report_paths"])
+            trades_csv = Path(report["report_paths"]["trades_csv"]).read_text(encoding="utf-8")
+            self.assertIn("probability_buy_win", trades_csv)
+            self.assertIn("WIN", trades_csv)
+            self.assertTrue(report["config"]["save_trades"])
+
     async def test_trade_label_replay_uses_recent_windows_with_enough_history(self):
         import scripts.run_historical_experiments as script
 
