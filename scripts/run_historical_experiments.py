@@ -32,6 +32,8 @@ DEFAULT_HORIZON_MINUTES = 60
 DEFAULT_MAX_CANDLES = 500
 DEFAULT_MAX_PREDICTIONS = 100
 DEFAULT_TRADE_LABEL_MIN_TRAIN_ROWS = 150
+DEFAULT_TRADE_LABEL_SCHEME = "touch_only"
+ALLOWED_TRADE_LABEL_SCHEMES = {"touch_only", "hybrid_touch_or_expiry"}
 HISTORICAL_SENTIMENT_USED = False
 HISTORICAL_SENTIMENT_NOTE = "Fear & Greed current value disabled for historical replay to avoid time leakage."
 MIN_EVALUATION_CANDLES_BY_INTERVAL_MINUTES = {
@@ -294,11 +296,14 @@ def diagnostic_metrics(result: dict[str, Any] | None) -> dict[str, Any]:
         "hold_reasons_summary": hold_reasons(feature_rows),
         "feature_nan_summary": combined_feature_nan_summary(feature_rows),
         "label_level_mode": first_feature_value(feature_rows, "label_level_mode"),
+        "trade_label_scheme": first_feature_value(feature_rows, "trade_label_scheme"),
         "label_params": {
             "min_train_rows": first_feature_value(feature_rows, "min_train_rows"),
+            "trade_label_scheme": first_feature_value(feature_rows, "trade_label_scheme"),
             "label_stop_loss_pct": first_feature_value(feature_rows, "label_stop_loss_pct"),
             "label_take_profit_pct": first_feature_value(feature_rows, "label_take_profit_pct"),
             "label_horizon_candles": first_feature_value(feature_rows, "label_horizon_candles"),
+            "expiry_return_threshold_pct": first_feature_value(feature_rows, "expiry_return_threshold_pct"),
             "label_atr_stop_multiplier": first_feature_value(feature_rows, "label_atr_stop_multiplier"),
             "label_atr_take_profit_multiplier": first_feature_value(feature_rows, "label_atr_take_profit_multiplier"),
             "label_min_risk_reward": first_feature_value(feature_rows, "label_min_risk_reward"),
@@ -338,6 +343,7 @@ def flatten_trade_rows(
             "strategy_mode": strategy_mode,
             "use_trade_labels": bool(use_trade_labels),
             "label_type": features.get("label_type"),
+            "trade_label_scheme": features.get("trade_label_scheme"),
             "label_level_mode": features.get("label_level_mode"),
             "label_horizon_candles": features.get("label_horizon_candles"),
             "created_at": prediction.get("created_at"),
@@ -421,7 +427,10 @@ async def run_experiments(
     reports_dir: str | Path = "reports",
     use_trade_labels: bool = False,
     save_trades: bool = False,
+    trade_label_scheme: str = DEFAULT_TRADE_LABEL_SCHEME,
 ) -> dict[str, Any]:
+    if trade_label_scheme not in ALLOWED_TRADE_LABEL_SCHEMES:
+        raise ValueError(f"Unsupported trade_label_scheme: {trade_label_scheme}")
     strategy_modes = validate_strategy_modes(strategy_modes)
     store = PredictionStore() if persist else None
     summaries: list[dict[str, Any]] = []
@@ -439,6 +448,7 @@ async def run_experiments(
             if use_trade_labels:
                 run_strategy_params.update({
                     "use_trade_labels": True,
+                    "trade_label_scheme": trade_label_scheme,
                     "horizon_candles": replay_horizon_candles,
                     "min_train_rows": DEFAULT_TRADE_LABEL_MIN_TRAIN_ROWS,
                     "commission_pct": 0.001,
@@ -555,6 +565,7 @@ async def run_experiments(
             "sentiment_used": HISTORICAL_SENTIMENT_USED,
             "sentiment_note": HISTORICAL_SENTIMENT_NOTE,
             "use_trade_labels": use_trade_labels,
+            "trade_label_scheme": trade_label_scheme if use_trade_labels else None,
             "trade_label_min_train_rows": DEFAULT_TRADE_LABEL_MIN_TRAIN_ROWS if use_trade_labels else None,
             "save_trades": save_trades,
             "persist": persist,
@@ -598,7 +609,7 @@ def write_report(report: dict[str, Any], reports_dir: str | Path = "reports", sa
         "avg_buy_label_count", "avg_sell_label_count",
         "avg_buy_positive_rate", "avg_sell_positive_rate",
         "hold_reasons_summary", "feature_nan_summary", "label_level_mode",
-        "label_params", "label_horizon_candles", "label_type",
+        "trade_label_scheme", "label_params", "label_horizon_candles", "label_type",
         "confidence_buckets", "hourly_performance_utc", "best_hour_utc",
         "worst_hour_utc", "warnings",
     ]
@@ -619,6 +630,7 @@ def write_report(report: dict[str, Any], reports_dir: str | Path = "reports", sa
         trade_fieldnames = [
             "symbol", "timeframe", "strategy_mode", "use_trade_labels",
             "label_type", "label_level_mode", "label_horizon_candles",
+            "trade_label_scheme",
             "created_at", "signal", "confidence", "probability_buy_win",
             "probability_sell_win", "entry_price", "exit_price", "outcome",
             "return_pct", "tp_hit", "sl_hit", "expired", "stop_distance_pct",
@@ -659,7 +671,7 @@ def print_summary(rows: list[dict[str, Any]]) -> None:
         "avg_buy_label_count", "avg_sell_label_count",
         "avg_buy_positive_rate", "avg_sell_positive_rate",
         "hold_reasons_summary", "label_level_mode", "label_horizon_candles",
-        "label_type", "best_hour_utc", "worst_hour_utc", "warnings",
+        "trade_label_scheme", "label_type", "best_hour_utc", "worst_hour_utc", "warnings",
     ]
     widths = {header: max(len(header), *(len(str(row.get(header, ""))) for row in rows)) for header in headers}
     print(" | ".join(header.ljust(widths[header]) for header in headers))
@@ -679,6 +691,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--persist", action="store_true")
     parser.add_argument("--use-trade-labels", action="store_true")
     parser.add_argument("--save-trades", action="store_true")
+    parser.add_argument("--trade-label-scheme", choices=sorted(ALLOWED_TRADE_LABEL_SCHEMES), default=DEFAULT_TRADE_LABEL_SCHEME)
     return parser
 
 
@@ -694,6 +707,7 @@ async def main() -> None:
         persist=args.persist,
         use_trade_labels=args.use_trade_labels,
         save_trades=args.save_trades,
+        trade_label_scheme=args.trade_label_scheme,
     )
     print_summary(report["summary"])
     print(f"JSON report: {report['report_paths']['json']}")

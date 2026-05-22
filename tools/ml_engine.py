@@ -86,13 +86,16 @@ def build_trade_outcome_labels(
     spread_pct: float = 0.0003,
     stop_loss_pcts: pd.Series | np.ndarray | None = None,
     take_profit_pcts: pd.Series | np.ndarray | None = None,
+    label_scheme: str = "touch_only",
+    expiry_return_threshold_pct: float = 0.05,
 ) -> pd.DataFrame:
     """Fast directional trade labels equivalent to TP/SL touch outcomes.
 
-    Costs stay in the signature for experiment metadata parity, but this
-    primary directional label is based on TP/SL touches. EXPIRED, BREAKEVEN,
-    and INVALID_DATA remain NaN. Optional per-row stop/take-profit pct arrays
-    let labels match ATR-based strategy risk levels without using future data.
+    The default touch_only scheme labels only TP/SL touches and leaves EXPIRED,
+    BREAKEVEN, and INVALID_DATA as NaN. The hybrid_touch_or_expiry scheme keeps
+    TP/SL priority, then labels expiry using net return after costs. Optional
+    per-row stop/take-profit pct arrays let labels match ATR-based strategy
+    risk levels without using future data.
     """
     if horizon_candles <= 0:
         return pd.DataFrame(index=df.index, data={"buy_win": np.nan, "sell_win": np.nan})
@@ -108,6 +111,7 @@ def build_trade_outcome_labels(
     open_prices = data["open"].to_numpy(dtype=float)
     highs = data["high"].to_numpy(dtype=float)
     lows = data["low"].to_numpy(dtype=float)
+    closes = data["close"].to_numpy(dtype=float)
     stop_pcts = (
         np.asarray(stop_loss_pcts, dtype=float)
         if stop_loss_pcts is not None
@@ -156,6 +160,15 @@ def build_trade_outcome_labels(
             if buy_hit_tp:
                 buy_labels[index_n] = 1.0
                 break
+        if np.isnan(buy_labels[index_n]) and label_scheme == "hybrid_touch_or_expiry":
+            exit_price = closes[end_idx - 1]
+            return_pct = (exit_price - entry) / entry * 100
+            costs = abs(entry + exit_price) * (commission_pct + slippage_pct + spread_pct / 2)
+            net_return_pct = return_pct - (costs / entry * 100)
+            if net_return_pct > expiry_return_threshold_pct:
+                buy_labels[index_n] = 1.0
+            elif net_return_pct < -expiry_return_threshold_pct:
+                buy_labels[index_n] = 0.0
 
         for high, low in zip(path_highs, path_lows):
             sell_hit_sl = high >= sell_sl
@@ -169,6 +182,15 @@ def build_trade_outcome_labels(
             if sell_hit_tp:
                 sell_labels[index_n] = 1.0
                 break
+        if np.isnan(sell_labels[index_n]) and label_scheme == "hybrid_touch_or_expiry":
+            exit_price = closes[end_idx - 1]
+            return_pct = (entry - exit_price) / entry * 100
+            costs = abs(entry + exit_price) * (commission_pct + slippage_pct + spread_pct / 2)
+            net_return_pct = return_pct - (costs / entry * 100)
+            if net_return_pct > expiry_return_threshold_pct:
+                sell_labels[index_n] = 1.0
+            elif net_return_pct < -expiry_return_threshold_pct:
+                sell_labels[index_n] = 0.0
 
     return pd.DataFrame(index=df.index, data={"buy_win": buy_labels, "sell_win": sell_labels})
 
@@ -373,7 +395,14 @@ def xgboost_signal(
     buy_threshold = float(strategy_params.get("probability_buy_threshold", 0.58))
     sell_threshold = float(strategy_params.get("probability_sell_threshold", 0.42))
     use_trade_labels = bool(strategy_params.get("use_trade_labels", False))
-    label_type = "trade_outcome_directional" if use_trade_labels else "price_return"
+    trade_label_scheme = str(strategy_params.get("trade_label_scheme", "touch_only"))
+    label_type = (
+        "trade_outcome_directional"
+        if use_trade_labels and trade_label_scheme == "touch_only"
+        else trade_label_scheme
+        if use_trade_labels
+        else "price_return"
+    )
     buy_win_threshold = float(strategy_params.get("buy_win_threshold", buy_threshold))
     sell_win_threshold = float(strategy_params.get("sell_win_threshold", 1 - sell_threshold))
     label_stop_loss_pct = float(strategy_params.get("stop_loss_pct", 0.03))
@@ -381,6 +410,7 @@ def xgboost_signal(
     label_commission_pct = float(strategy_params.get("commission_pct", 0.001))
     label_slippage_pct = float(strategy_params.get("slippage_pct", 0.0005))
     label_spread_pct = float(strategy_params.get("spread_pct", 0.0003))
+    expiry_return_threshold_pct = float(strategy_params.get("expiry_return_threshold_pct", 0.05))
     min_rr = float(strategy_params.get("min_risk_reward", 1.5))
     atr_stop_multiplier = float(strategy_params.get("atr_stop_multiplier", 1.5))
     atr_take_profit_multiplier_value = strategy_params.get("atr_take_profit_multiplier")
@@ -398,11 +428,13 @@ def xgboost_signal(
     )
     label_params = {
         "label_type": label_type,
+        "trade_label_scheme": trade_label_scheme if use_trade_labels else None,
         "min_train_rows": min_train_rows if use_trade_labels else None,
         "label_level_mode": label_level_mode if use_trade_labels else None,
         "label_stop_loss_pct": label_stop_loss_pct if use_trade_labels else None,
         "label_take_profit_pct": label_take_profit_pct if use_trade_labels else None,
         "label_horizon_candles": horizon_candles if use_trade_labels else None,
+        "expiry_return_threshold_pct": expiry_return_threshold_pct if use_trade_labels else None,
         "label_atr_stop_multiplier": atr_stop_multiplier if use_trade_labels and label_level_mode == "atr" else None,
         "label_atr_take_profit_multiplier": atr_take_profit_multiplier if use_trade_labels and label_level_mode == "atr" else None,
         "label_min_risk_reward": min_rr if use_trade_labels and label_level_mode == "atr" else None,
@@ -413,9 +445,13 @@ def xgboost_signal(
         } if use_trade_labels else None,
         "label_level_note": (
             "atr_aligned_trade_labels; costs_recorded_but_primary_label_is_tp_sl_touch"
-            if use_trade_labels and label_level_mode == "atr"
+            if use_trade_labels and label_level_mode == "atr" and trade_label_scheme == "touch_only"
+            else "atr_aligned_hybrid_touch_or_expiry; expiry labels use net return after costs"
+            if use_trade_labels and label_level_mode == "atr" and trade_label_scheme == "hybrid_touch_or_expiry"
             else "fixed_pct_trade_labels; costs_recorded_but_primary_label_is_tp_sl_touch"
-            if use_trade_labels
+            if use_trade_labels and trade_label_scheme == "touch_only"
+            else "fixed_pct_hybrid_touch_or_expiry; expiry labels use net return after costs"
+            if use_trade_labels and trade_label_scheme == "hybrid_touch_or_expiry"
             else None
         ),
     }
@@ -483,6 +519,8 @@ def xgboost_signal(
             spread_pct=label_spread_pct,
             stop_loss_pcts=label_stop_pcts,
             take_profit_pcts=label_take_pcts,
+            label_scheme=trade_label_scheme,
+            expiry_return_threshold_pct=expiry_return_threshold_pct,
         )
         buy_x, buy_y, sell_x, sell_y = _prepared_trade_dataset(data.iloc[:-1], trade_labels, feature_cols)
         x = buy_x
