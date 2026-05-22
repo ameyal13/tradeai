@@ -30,6 +30,7 @@ def diagnostic_result():
             "stop_loss": 95,
             "take_profit": 110,
             "risk_reward_ratio": 2,
+            "created_at": "2026-01-01T08:00:00+00:00",
         },
         {
             "id": "sell-loss",
@@ -39,12 +40,14 @@ def diagnostic_result():
             "stop_loss": 105,
             "take_profit": 90,
             "risk_reward_ratio": 2,
+            "created_at": "2026-01-01T09:00:00+00:00",
         },
         {
             "id": "hold",
             "signal": "HOLD",
             "confidence": 35,
             "entry_price": 100,
+            "created_at": "2026-01-01T09:30:00+00:00",
         },
         {
             "id": "buy-expired",
@@ -54,6 +57,7 @@ def diagnostic_result():
             "stop_loss": 97,
             "take_profit": 106,
             "risk_reward_ratio": 2,
+            "created_at": "2026-01-01T10:00:00+00:00",
         },
     ]
     outcomes = [
@@ -288,11 +292,26 @@ class HistoricalExperimentTests(unittest.IsolatedAsyncioTestCase):
             "avg_confidence", "avg_risk_reward", "avg_stop_distance_pct",
             "avg_take_profit_distance_pct", "tp_hit_count", "sl_hit_count",
             "expired_count", "confidence_buckets",
+            "hourly_performance_utc", "best_hour_utc", "worst_hour_utc",
         ]:
             self.assertIn(key, row)
         self.assertEqual(row["buy_count"], 2)
         self.assertEqual(row["sell_count"], 1)
         self.assertEqual(row["hold_count"], 1)
+        self.assertEqual(row["best_hour_utc"], "08:00")
+        self.assertEqual(row["worst_hour_utc"], "09:00")
+
+    async def test_hourly_performance_groups_predictions_by_utc_hour(self):
+        import scripts.run_historical_experiments as script
+
+        row = script.summarize_run("BTC", "15m", "deterministic", result=diagnostic_result())
+        hourly = row["hourly_performance_utc"]
+
+        self.assertEqual(hourly["08:00"]["evaluated_predictions"], 1)
+        self.assertEqual(hourly["08:00"]["win_rate"], 100)
+        self.assertEqual(hourly["09:00"]["evaluated_predictions"], 1)
+        self.assertEqual(hourly["09:00"]["average_return"], -1.0)
+        self.assertEqual(hourly["10:00"]["evaluated_predictions"], 1)
 
     async def test_separates_buy_vs_sell_performance(self):
         import scripts.run_historical_experiments as script

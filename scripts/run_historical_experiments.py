@@ -153,6 +153,54 @@ def performance_for_predictions(predictions: list[dict[str, Any]], outcomes_by_p
     }
 
 
+def prediction_hour_utc(prediction: dict[str, Any]) -> str:
+    value = prediction.get("created_at")
+    if not value:
+        return "unknown"
+    try:
+        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return f"{dt.astimezone(timezone.utc).hour:02d}:00"
+    except (TypeError, ValueError):
+        return "unknown"
+
+
+def performance_by_hour_utc(
+    predictions: list[dict[str, Any]],
+    outcomes_by_prediction: dict[str, dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    buckets: dict[str, list[dict[str, Any]]] = {}
+    for prediction in predictions:
+        buckets.setdefault(prediction_hour_utc(prediction), []).append(prediction)
+    return {
+        hour: performance_for_predictions(group, outcomes_by_prediction)
+        for hour, group in sorted(buckets.items())
+    }
+
+
+def best_hour_by_average_return(hourly: dict[str, dict[str, Any]]) -> str | None:
+    evaluated = [
+        (hour, metrics)
+        for hour, metrics in hourly.items()
+        if metrics.get("evaluated_predictions", 0) > 0
+    ]
+    if not evaluated:
+        return None
+    return max(evaluated, key=lambda item: (item[1].get("average_return", 0), item[1].get("profit_factor", 0)))[0]
+
+
+def worst_hour_by_average_return(hourly: dict[str, dict[str, Any]]) -> str | None:
+    evaluated = [
+        (hour, metrics)
+        for hour, metrics in hourly.items()
+        if metrics.get("evaluated_predictions", 0) > 0
+    ]
+    if not evaluated:
+        return None
+    return min(evaluated, key=lambda item: (item[1].get("average_return", 0), item[1].get("profit_factor", 0)))[0]
+
+
 def confidence_bucket(confidence: Any) -> str:
     value = safe_float(confidence)
     if value is None:
@@ -201,6 +249,7 @@ def diagnostic_metrics(result: dict[str, Any] | None) -> dict[str, Any]:
         for name, group in buckets.items()
         if group
     }
+    hourly_metrics = performance_by_hour_utc(predictions, outcomes_by_prediction)
 
     return {
         "buy_count": len(buy_predictions),
@@ -218,6 +267,9 @@ def diagnostic_metrics(result: dict[str, Any] | None) -> dict[str, Any]:
         "sl_hit_count": sum(1 for outcome in outcomes if outcome.get("hit_stop_loss")),
         "expired_count": sum(1 for outcome in outcomes if outcome.get("outcome") == "EXPIRED"),
         "confidence_buckets": bucket_metrics,
+        "hourly_performance_utc": hourly_metrics,
+        "best_hour_utc": best_hour_by_average_return(hourly_metrics),
+        "worst_hour_utc": worst_hour_by_average_return(hourly_metrics),
         "avg_probability_buy_win": average_feature_value(feature_rows, "probability_buy_win"),
         "avg_probability_sell_win": average_feature_value(feature_rows, "probability_sell_win"),
         "max_probability_buy_win": max_feature_value(feature_rows, "probability_buy_win"),
@@ -471,7 +523,8 @@ def write_report(report: dict[str, Any], reports_dir: str | Path = "reports") ->
         "avg_buy_positive_rate", "avg_sell_positive_rate",
         "hold_reasons_summary", "feature_nan_summary", "label_level_mode",
         "label_params", "label_horizon_candles", "label_type",
-        "confidence_buckets", "warnings",
+        "confidence_buckets", "hourly_performance_utc", "best_hour_utc",
+        "worst_hour_utc", "warnings",
     ]
     with csv_path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
@@ -479,6 +532,7 @@ def write_report(report: dict[str, Any], reports_dir: str | Path = "reports") ->
         for row in rows:
             csv_row = dict(row)
             csv_row["confidence_buckets"] = json.dumps(csv_row.get("confidence_buckets", {}), sort_keys=True)
+            csv_row["hourly_performance_utc"] = json.dumps(csv_row.get("hourly_performance_utc", {}), sort_keys=True)
             csv_row["hold_reasons_summary"] = json.dumps(csv_row.get("hold_reasons_summary", {}), sort_keys=True)
             csv_row["feature_nan_summary"] = json.dumps(csv_row.get("feature_nan_summary", {}), sort_keys=True)
             csv_row["label_params"] = json.dumps(csv_row.get("label_params", {}), sort_keys=True)
@@ -507,7 +561,7 @@ def print_summary(rows: list[dict[str, Any]]) -> None:
         "avg_buy_label_count", "avg_sell_label_count",
         "avg_buy_positive_rate", "avg_sell_positive_rate",
         "hold_reasons_summary", "label_level_mode", "label_horizon_candles",
-        "label_type", "warnings",
+        "label_type", "best_hour_utc", "worst_hour_utc", "warnings",
     ]
     widths = {header: max(len(header), *(len(str(row.get(header, ""))) for row in rows)) for header in headers}
     print(" | ".join(header.ljust(widths[header]) for header in headers))
