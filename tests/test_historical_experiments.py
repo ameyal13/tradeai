@@ -349,6 +349,7 @@ class HistoricalExperimentTests(unittest.IsolatedAsyncioTestCase):
             "metrics": [],
             "assumptions": {},
         }
+        csv_text = ""
         with tempfile.TemporaryDirectory() as tmp:
             with patch.object(script, "fetch_binance_klines", new=AsyncMock(return_value=synthetic_candles())):
                 with patch.object(script, "run_historical_replay", return_value=replay_result) as replay:
@@ -359,6 +360,7 @@ class HistoricalExperimentTests(unittest.IsolatedAsyncioTestCase):
                         reports_dir=tmp,
                         use_trade_labels=True,
                     )
+                    csv_text = Path(report["report_paths"]["csv"]).read_text(encoding="utf-8")
 
         self.assertEqual(replay.call_args.kwargs["strategy_params"], {
             "use_sentiment": False,
@@ -370,6 +372,9 @@ class HistoricalExperimentTests(unittest.IsolatedAsyncioTestCase):
         })
         self.assertTrue(report["config"]["use_trade_labels"])
         self.assertTrue(report["runs"][0]["use_trade_labels"])
+        self.assertTrue(report["summary"][0]["use_trade_labels"])
+        self.assertIn("use_trade_labels", csv_text)
+        self.assertIn("true", csv_text.lower())
 
     async def test_historical_report_includes_sentiment_disabled_note(self):
         import scripts.run_historical_experiments as script

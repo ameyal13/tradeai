@@ -227,6 +227,7 @@ def summarize_run(
     evaluation_horizon_candles: int | None = None,
     sentiment_used: bool = HISTORICAL_SENTIMENT_USED,
     sentiment_note: str = HISTORICAL_SENTIMENT_NOTE,
+    use_trade_labels: bool = False,
 ) -> dict[str, Any]:
     metric = first_metric(result or {})
     outcomes = (result or {}).get("outcomes") or []
@@ -247,6 +248,7 @@ def summarize_run(
         "evaluation_horizon_candles": evaluation_horizon_candles,
         "sentiment_used": sentiment_used,
         "sentiment_note": sentiment_note,
+        "use_trade_labels": bool(use_trade_labels),
         "total_predictions": len((result or {}).get("predictions") or []),
         "evaluated_predictions": metric.get("evaluated_predictions", len(outcomes)),
         "win_rate": metric.get("win_rate", 0),
@@ -314,6 +316,7 @@ async def run_experiments(
                             requested_horizon_minutes=horizon_minutes,
                             effective_horizon_minutes_value=replay_horizon_minutes,
                             evaluation_horizon_candles=replay_horizon_candles,
+                            use_trade_labels=use_trade_labels,
                         )
                     )
                 continue
@@ -340,6 +343,7 @@ async def run_experiments(
                             requested_horizon_minutes=horizon_minutes,
                             effective_horizon_minutes_value=replay_horizon_minutes,
                             evaluation_horizon_candles=replay_horizon_candles,
+                            use_trade_labels=use_trade_labels,
                         )
                     )
                     raw_runs.append({
@@ -365,6 +369,7 @@ async def run_experiments(
                             requested_horizon_minutes=horizon_minutes,
                             effective_horizon_minutes_value=replay_horizon_minutes,
                             evaluation_horizon_candles=replay_horizon_candles,
+                            use_trade_labels=use_trade_labels,
                         )
                     )
 
@@ -404,6 +409,7 @@ def write_report(report: dict[str, Any], reports_dir: str | Path = "reports") ->
         "symbol", "timeframe", "strategy_mode", "total_predictions",
         "requested_horizon_minutes", "effective_horizon_minutes",
         "evaluation_horizon_candles", "sentiment_used", "sentiment_note",
+        "use_trade_labels",
         "evaluated_predictions", "win_rate", "average_return",
         "total_return_pct", "profit_factor", "max_drawdown", "sharpe",
         "invalid_count", "buy_count", "sell_count", "hold_count",
@@ -425,6 +431,7 @@ def write_report(report: dict[str, Any], reports_dir: str | Path = "reports") ->
             csv_row = dict(row)
             csv_row["confidence_buckets"] = json.dumps(csv_row.get("confidence_buckets", {}), sort_keys=True)
             csv_row["hold_reasons_summary"] = json.dumps(csv_row.get("hold_reasons_summary", {}), sort_keys=True)
+            csv_row["use_trade_labels"] = "true" if csv_row.get("use_trade_labels") else "false"
             writer.writerow(csv_row)
     return {"json": str(json_path), "csv": str(csv_path)}
 
@@ -433,7 +440,7 @@ def print_summary(rows: list[dict[str, Any]]) -> None:
     headers = [
         "symbol", "timeframe", "strategy_mode", "total_predictions",
         "requested_horizon_minutes", "effective_horizon_minutes",
-        "evaluation_horizon_candles", "sentiment_used",
+        "evaluation_horizon_candles", "sentiment_used", "use_trade_labels",
         "evaluated_predictions", "win_rate", "average_return",
         "total_return_pct", "profit_factor", "max_drawdown", "sharpe",
         "invalid_count", "buy_count", "sell_count", "hold_count",

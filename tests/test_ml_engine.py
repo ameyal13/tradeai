@@ -5,7 +5,13 @@ from unittest.mock import patch
 import numpy as np
 import pandas as pd
 
-from tools.ml_engine import build_trade_outcome_labels, walk_forward_accuracy, xgboost_signal
+from tools.ml_engine import (
+    FEATURE_COLS,
+    _prepared_trade_dataset,
+    build_trade_outcome_labels,
+    walk_forward_accuracy,
+    xgboost_signal,
+)
 from tools.strategy_signals import add_features, generate_strategy_signal_from_df, xgboost_signal_from_df
 from tools.trade_labels import label_trade_at_index
 
@@ -183,6 +189,48 @@ class MLEngineTests(unittest.TestCase):
 
         self.assertTrue(valid_values.issubset({0.0, 1.0}))
 
+    def test_prepared_trade_dataset_allows_only_buy_labels(self):
+        features = pd.DataFrame({column: [1.0, 2.0, 3.0] for column in FEATURE_COLS})
+        labels = pd.DataFrame({
+            "buy_win": [1.0, 0.0, np.nan],
+            "sell_win": [np.nan, np.nan, np.nan],
+        })
+
+        x_buy, y_buy, x_sell, y_sell = _prepared_trade_dataset(features, labels, FEATURE_COLS)
+
+        self.assertEqual(len(x_buy), 2)
+        self.assertEqual(len(y_buy), 2)
+        self.assertEqual(len(x_sell), 0)
+        self.assertEqual(len(y_sell), 0)
+
+    def test_prepared_trade_dataset_allows_only_sell_labels(self):
+        features = pd.DataFrame({column: [1.0, 2.0, 3.0] for column in FEATURE_COLS})
+        labels = pd.DataFrame({
+            "buy_win": [np.nan, np.nan, np.nan],
+            "sell_win": [1.0, 0.0, np.nan],
+        })
+
+        x_buy, y_buy, x_sell, y_sell = _prepared_trade_dataset(features, labels, FEATURE_COLS)
+
+        self.assertEqual(len(x_buy), 0)
+        self.assertEqual(len(y_buy), 0)
+        self.assertEqual(len(x_sell), 2)
+        self.assertEqual(len(y_sell), 2)
+
+    def test_prepared_trade_dataset_does_not_require_buy_sell_intersection(self):
+        features = pd.DataFrame({column: [1.0, 2.0, 3.0] for column in FEATURE_COLS})
+        labels = pd.DataFrame({
+            "buy_win": [1.0, np.nan, np.nan],
+            "sell_win": [np.nan, 1.0, np.nan],
+        })
+
+        x_buy, y_buy, x_sell, y_sell = _prepared_trade_dataset(features, labels, FEATURE_COLS)
+
+        self.assertEqual(len(x_buy), 1)
+        self.assertEqual(len(y_buy), 1)
+        self.assertEqual(len(x_sell), 1)
+        self.assertEqual(len(y_sell), 1)
+
     def test_trade_label_builder_benchmark_500_rows_under_one_second(self):
         idx = pd.date_range("2023-01-01", periods=500, freq="15min", tz="UTC")
         rng = np.random.default_rng(42)
@@ -238,6 +286,8 @@ class MLEngineTests(unittest.TestCase):
         self.assertIn("sell_threshold", result)
         self.assertIn("decision_margin", result)
         self.assertIn("hold_reason", result)
+        self.assertGreater(result["buy_label_count"], 0)
+        self.assertGreater(result["sell_label_count"], 0)
         self.assertIn(result["signal"], {"BUY", "SELL", "HOLD"})
 
     def test_xgboost_trade_label_hold_includes_hold_reason(self):

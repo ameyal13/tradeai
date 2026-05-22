@@ -224,17 +224,16 @@ def _prepared_trade_dataset(
     df_features: pd.DataFrame,
     trade_labels: pd.DataFrame,
     feature_cols: list[str],
-) -> tuple[pd.DataFrame, pd.Series, pd.Series]:
+) -> tuple[pd.DataFrame, pd.Series, pd.DataFrame, pd.Series]:
     data = _feature_frame(df_features)
-    valid = (
-        data[feature_cols].notna().all(axis=1)
-        & trade_labels["buy_win"].notna()
-        & trade_labels["sell_win"].notna()
-    )
+    features_valid = data[feature_cols].notna().all(axis=1)
+    buy_valid = features_valid & trade_labels["buy_win"].notna()
+    sell_valid = features_valid & trade_labels["sell_win"].notna()
     return (
-        data.loc[valid, feature_cols],
-        trade_labels.loc[valid, "buy_win"].astype(int),
-        trade_labels.loc[valid, "sell_win"].astype(int),
+        data.loc[buy_valid, feature_cols],
+        trade_labels.loc[buy_valid, "buy_win"].astype(int),
+        data.loc[sell_valid, feature_cols],
+        trade_labels.loc[sell_valid, "sell_win"].astype(int),
     )
 
 
@@ -401,8 +400,7 @@ def xgboost_signal(
             slippage_pct=label_slippage_pct,
             spread_pct=label_spread_pct,
         )
-        buy_x, buy_y = _prepared_directional_trade_dataset(data.iloc[:-1], trade_labels, feature_cols, "buy_win")
-        sell_x, sell_y = _prepared_directional_trade_dataset(data.iloc[:-1], trade_labels, feature_cols, "sell_win")
+        buy_x, buy_y, sell_x, sell_y = _prepared_trade_dataset(data.iloc[:-1], trade_labels, feature_cols)
         x = buy_x
         y = buy_y
         trade_diag.update({
