@@ -88,6 +88,42 @@ class MLEngineTests(unittest.TestCase):
         self.assertEqual(labels.iloc[0]["buy_win"], 0)
         self.assertEqual(labels.iloc[0]["sell_win"], 0)
 
+    def test_trade_outcome_labels_support_dynamic_atr_like_levels(self):
+        idx = pd.date_range("2026-01-01", periods=8, freq="h", tz="UTC")
+        df = pd.DataFrame({
+            "timestamp": idx,
+            "open": [100, 100, 100, 100, 100, 100, 100, 100],
+            "high": [100, 101, 101, 101, 101, 101, 101, 101],
+            "low": [100, 99, 99, 99, 99, 99, 99, 99],
+            "close": [100, 100, 100, 100, 100, 100, 100, 100],
+            "volume": [1000] * 8,
+        })
+
+        fixed = build_trade_outcome_labels(
+            df,
+            horizon_candles=4,
+            stop_loss_pct=0.03,
+            take_profit_pct=0.045,
+            commission_pct=0,
+            slippage_pct=0,
+            spread_pct=0,
+        )
+        dynamic = build_trade_outcome_labels(
+            df,
+            horizon_candles=4,
+            stop_loss_pct=0.03,
+            take_profit_pct=0.045,
+            commission_pct=0,
+            slippage_pct=0,
+            spread_pct=0,
+            stop_loss_pcts=np.full(len(df), 0.005),
+            take_profit_pcts=np.full(len(df), 0.008),
+        )
+
+        self.assertTrue(np.isnan(fixed.iloc[0]["buy_win"]))
+        self.assertEqual(dynamic.iloc[0]["buy_win"], 0.0)
+        self.assertEqual(dynamic.iloc[0]["sell_win"], 0.0)
+
     def test_fast_trade_labels_match_reference_for_buy_and_sell(self):
         df = sample_candles(40)
         labels = build_trade_outcome_labels(
@@ -288,7 +324,27 @@ class MLEngineTests(unittest.TestCase):
         self.assertIn("hold_reason", result)
         self.assertGreater(result["buy_label_count"], 0)
         self.assertGreater(result["sell_label_count"], 0)
+        self.assertIn("raw_buy_label_count", result)
+        self.assertIn("raw_sell_label_count", result)
+        self.assertIn("feature_valid_count", result)
+        self.assertIn("feature_nan_summary", result)
         self.assertIn(result["signal"], {"BUY", "SELL", "HOLD"})
+
+    def test_xgboost_trade_labels_default_to_atr_aligned_levels(self):
+        features = add_features(sample_candles(300))
+        result = xgboost_signal(
+            features,
+            min_train_rows=30,
+            strategy_params={
+                "use_trade_labels": True,
+                "horizon_candles": 4,
+                "commission_pct": 0,
+                "slippage_pct": 0,
+            },
+        )
+
+        self.assertEqual(result["label_level_mode"], "atr")
+        self.assertIn("atr_aligned_trade_labels", result["label_level_note"])
 
     def test_xgboost_trade_label_hold_includes_hold_reason(self):
         features = add_features(sample_candles(300))

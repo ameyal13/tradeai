@@ -31,6 +31,7 @@ ALLOWED_STRATEGY_MODES = {"deterministic", "model_based", "hybrid", "xgboost"}
 DEFAULT_HORIZON_MINUTES = 60
 DEFAULT_MAX_CANDLES = 500
 DEFAULT_MAX_PREDICTIONS = 100
+DEFAULT_TRADE_LABEL_MIN_TRAIN_ROWS = 150
 HISTORICAL_SENTIMENT_USED = False
 HISTORICAL_SENTIMENT_NOTE = "Fear & Greed current value disabled for historical replay to avoid time leakage."
 MIN_EVALUATION_CANDLES_BY_INTERVAL_MINUTES = {
@@ -115,6 +116,20 @@ def hold_reasons(feature_rows: list[dict[str, Any]]) -> dict[str, int]:
         reason = row.get("hold_reason")
         if reason:
             summary[str(reason)] = summary.get(str(reason), 0) + 1
+    return summary
+
+
+def combined_feature_nan_summary(feature_rows: list[dict[str, Any]]) -> dict[str, int]:
+    summary: dict[str, int] = {}
+    for row in feature_rows:
+        values = row.get("feature_nan_summary") or {}
+        if not isinstance(values, dict):
+            continue
+        for key, value in values.items():
+            try:
+                summary[str(key)] = summary.get(str(key), 0) + int(value)
+            except (TypeError, ValueError):
+                continue
     return summary
 
 
@@ -207,11 +222,29 @@ def diagnostic_metrics(result: dict[str, Any] | None) -> dict[str, Any]:
         "avg_probability_sell_win": average_feature_value(feature_rows, "probability_sell_win"),
         "max_probability_buy_win": max_feature_value(feature_rows, "probability_buy_win"),
         "max_probability_sell_win": max_feature_value(feature_rows, "probability_sell_win"),
+        "raw_buy_label_count": average_feature_value(feature_rows, "raw_buy_label_count"),
+        "raw_sell_label_count": average_feature_value(feature_rows, "raw_sell_label_count"),
+        "raw_buy_positive_count": average_feature_value(feature_rows, "raw_buy_positive_count"),
+        "raw_sell_positive_count": average_feature_value(feature_rows, "raw_sell_positive_count"),
+        "feature_valid_count": average_feature_value(feature_rows, "feature_valid_count"),
         "avg_buy_label_count": average_feature_value(feature_rows, "buy_label_count"),
         "avg_sell_label_count": average_feature_value(feature_rows, "sell_label_count"),
         "avg_buy_positive_rate": average_feature_value(feature_rows, "buy_positive_rate"),
         "avg_sell_positive_rate": average_feature_value(feature_rows, "sell_positive_rate"),
         "hold_reasons_summary": hold_reasons(feature_rows),
+        "feature_nan_summary": combined_feature_nan_summary(feature_rows),
+        "label_level_mode": first_feature_value(feature_rows, "label_level_mode"),
+        "label_params": {
+            "min_train_rows": first_feature_value(feature_rows, "min_train_rows"),
+            "label_stop_loss_pct": first_feature_value(feature_rows, "label_stop_loss_pct"),
+            "label_take_profit_pct": first_feature_value(feature_rows, "label_take_profit_pct"),
+            "label_horizon_candles": first_feature_value(feature_rows, "label_horizon_candles"),
+            "label_atr_stop_multiplier": first_feature_value(feature_rows, "label_atr_stop_multiplier"),
+            "label_atr_take_profit_multiplier": first_feature_value(feature_rows, "label_atr_take_profit_multiplier"),
+            "label_min_risk_reward": first_feature_value(feature_rows, "label_min_risk_reward"),
+            "label_costs": first_feature_value(feature_rows, "label_costs"),
+        },
+        "label_horizon_candles": first_feature_value(feature_rows, "label_horizon_candles"),
         "label_type": first_feature_value(feature_rows, "label_type"),
     }
 
@@ -287,14 +320,18 @@ async def run_experiments(
             replay_horizon_candles = horizon_candles_for_interval(horizon_minutes, timeframe)
             replay_horizon_minutes = effective_horizon_minutes(horizon_minutes, timeframe)
             run_strategy_params = dict(strategy_params)
+            replay_min_history = 50
             if use_trade_labels:
                 run_strategy_params.update({
                     "use_trade_labels": True,
                     "horizon_candles": replay_horizon_candles,
+                    "min_train_rows": DEFAULT_TRADE_LABEL_MIN_TRAIN_ROWS,
                     "commission_pct": 0.001,
                     "slippage_pct": 0.0005,
                     "spread_pct": 0.0003,
                 })
+                min_train_rows = int(run_strategy_params.get("min_train_rows", 200))
+                replay_min_history = max(replay_min_history, min_train_rows + 35 + replay_horizon_candles + 2)
             if replay_horizon_minutes != horizon_minutes:
                 print(
                     f"WARNING: {timeframe} requested_horizon_minutes={horizon_minutes} "
@@ -321,6 +358,11 @@ async def run_experiments(
                     )
                 continue
 
+            if use_trade_labels and max_predictions is not None:
+                last_n = len(candles) - replay_horizon_candles - 2
+                latest_window_start_n = max(0, last_n - max_predictions + 1)
+                replay_min_history = max(replay_min_history, latest_window_start_n + 1)
+
             for strategy_mode in strategy_modes:
                 try:
                     result = run_historical_replay(
@@ -331,6 +373,7 @@ async def run_experiments(
                         horizon_candles=replay_horizon_candles,
                         horizon_minutes=replay_horizon_minutes,
                         max_predictions=max_predictions,
+                        min_history=replay_min_history,
                         strategy_params=run_strategy_params,
                         store=store,
                     )
@@ -356,6 +399,7 @@ async def run_experiments(
                         "sentiment_used": HISTORICAL_SENTIMENT_USED,
                         "sentiment_note": HISTORICAL_SENTIMENT_NOTE,
                         "use_trade_labels": use_trade_labels,
+                        "min_history": replay_min_history,
                         "assumptions": result.get("assumptions", {}),
                         "metrics": result.get("metrics", []),
                     })
@@ -386,6 +430,7 @@ async def run_experiments(
             "sentiment_used": HISTORICAL_SENTIMENT_USED,
             "sentiment_note": HISTORICAL_SENTIMENT_NOTE,
             "use_trade_labels": use_trade_labels,
+            "trade_label_min_train_rows": DEFAULT_TRADE_LABEL_MIN_TRAIN_ROWS if use_trade_labels else None,
             "persist": persist,
         },
         "summary": summaries,
@@ -419,9 +464,13 @@ def write_report(report: dict[str, Any], reports_dir: str | Path = "reports") ->
         "tp_hit_count", "sl_hit_count", "expired_count",
         "avg_probability_buy_win", "avg_probability_sell_win",
         "max_probability_buy_win", "max_probability_sell_win",
+        "raw_buy_label_count", "raw_sell_label_count",
+        "raw_buy_positive_count", "raw_sell_positive_count",
+        "feature_valid_count",
         "avg_buy_label_count", "avg_sell_label_count",
         "avg_buy_positive_rate", "avg_sell_positive_rate",
-        "hold_reasons_summary", "label_type",
+        "hold_reasons_summary", "feature_nan_summary", "label_level_mode",
+        "label_params", "label_horizon_candles", "label_type",
         "confidence_buckets", "warnings",
     ]
     with csv_path.open("w", newline="", encoding="utf-8") as handle:
@@ -431,6 +480,8 @@ def write_report(report: dict[str, Any], reports_dir: str | Path = "reports") ->
             csv_row = dict(row)
             csv_row["confidence_buckets"] = json.dumps(csv_row.get("confidence_buckets", {}), sort_keys=True)
             csv_row["hold_reasons_summary"] = json.dumps(csv_row.get("hold_reasons_summary", {}), sort_keys=True)
+            csv_row["feature_nan_summary"] = json.dumps(csv_row.get("feature_nan_summary", {}), sort_keys=True)
+            csv_row["label_params"] = json.dumps(csv_row.get("label_params", {}), sort_keys=True)
             csv_row["use_trade_labels"] = "true" if csv_row.get("use_trade_labels") else "false"
             writer.writerow(csv_row)
     return {"json": str(json_path), "csv": str(csv_path)}
@@ -450,9 +501,13 @@ def print_summary(rows: list[dict[str, Any]]) -> None:
         "tp_hit_count", "sl_hit_count", "expired_count",
         "avg_probability_buy_win", "avg_probability_sell_win",
         "max_probability_buy_win", "max_probability_sell_win",
+        "raw_buy_label_count", "raw_sell_label_count",
+        "raw_buy_positive_count", "raw_sell_positive_count",
+        "feature_valid_count",
         "avg_buy_label_count", "avg_sell_label_count",
         "avg_buy_positive_rate", "avg_sell_positive_rate",
-        "hold_reasons_summary", "label_type", "warnings",
+        "hold_reasons_summary", "label_level_mode", "label_horizon_candles",
+        "label_type", "warnings",
     ]
     widths = {header: max(len(header), *(len(str(row.get(header, ""))) for row in rows)) for header in headers}
     print(" | ".join(header.ljust(widths[header]) for header in headers))

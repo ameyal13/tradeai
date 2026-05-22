@@ -84,12 +84,15 @@ def build_trade_outcome_labels(
     commission_pct: float,
     slippage_pct: float,
     spread_pct: float = 0.0003,
+    stop_loss_pcts: pd.Series | np.ndarray | None = None,
+    take_profit_pcts: pd.Series | np.ndarray | None = None,
 ) -> pd.DataFrame:
     """Fast directional trade labels equivalent to TP/SL touch outcomes.
 
     Costs stay in the signature for experiment metadata parity, but this
     primary directional label is based on TP/SL touches. EXPIRED, BREAKEVEN,
-    and INVALID_DATA remain NaN.
+    and INVALID_DATA remain NaN. Optional per-row stop/take-profit pct arrays
+    let labels match ATR-based strategy risk levels without using future data.
     """
     if horizon_candles <= 0:
         return pd.DataFrame(index=df.index, data={"buy_win": np.nan, "sell_win": np.nan})
@@ -105,6 +108,16 @@ def build_trade_outcome_labels(
     open_prices = data["open"].to_numpy(dtype=float)
     highs = data["high"].to_numpy(dtype=float)
     lows = data["low"].to_numpy(dtype=float)
+    stop_pcts = (
+        np.asarray(stop_loss_pcts, dtype=float)
+        if stop_loss_pcts is not None
+        else np.full(len(data), float(stop_loss_pct), dtype=float)
+    )
+    take_pcts = (
+        np.asarray(take_profit_pcts, dtype=float)
+        if take_profit_pcts is not None
+        else np.full(len(data), float(take_profit_pct), dtype=float)
+    )
     buy_labels = np.full(len(data), np.nan, dtype=float)
     sell_labels = np.full(len(data), np.nan, dtype=float)
 
@@ -112,15 +125,21 @@ def build_trade_outcome_labels(
         entry_idx = index_n + 1
         if entry_idx >= len(data):
             continue
-        end_idx = min(len(data), entry_idx + horizon_candles)
-        if end_idx <= entry_idx:
+        end_idx = entry_idx + horizon_candles
+        if end_idx > len(data):
             continue
 
         entry = open_prices[entry_idx]
-        buy_sl = entry * (1 - stop_loss_pct)
-        buy_tp = entry * (1 + take_profit_pct)
-        sell_sl = entry * (1 + stop_loss_pct)
-        sell_tp = entry * (1 - take_profit_pct)
+        row_stop_pct = stop_pcts[index_n] if index_n < len(stop_pcts) else stop_loss_pct
+        row_take_pct = take_pcts[index_n] if index_n < len(take_pcts) else take_profit_pct
+        if not np.isfinite(row_stop_pct) or row_stop_pct <= 0:
+            row_stop_pct = stop_loss_pct
+        if not np.isfinite(row_take_pct) or row_take_pct <= 0:
+            row_take_pct = take_profit_pct
+        buy_sl = entry * (1 - row_stop_pct)
+        buy_tp = entry * (1 + row_take_pct)
+        sell_sl = entry * (1 + row_stop_pct)
+        sell_tp = entry * (1 - row_take_pct)
 
         path_highs = highs[entry_idx:end_idx]
         path_lows = lows[entry_idx:end_idx]
@@ -237,15 +256,31 @@ def _prepared_trade_dataset(
     )
 
 
-def _prepared_directional_trade_dataset(
+def _feature_nan_summary(data: pd.DataFrame, feature_cols: list[str]) -> dict[str, int]:
+    return {column: int(data[column].isna().sum()) for column in feature_cols}
+
+
+def _atr_label_pcts(
     df_features: pd.DataFrame,
-    trade_labels: pd.DataFrame,
-    feature_cols: list[str],
-    label_col: str,
-) -> tuple[pd.DataFrame, pd.Series]:
+    atr_stop_multiplier: float,
+    min_rr: float,
+    atr_take_profit_multiplier: float | None,
+    fallback_stop_loss_pct: float,
+    fallback_take_profit_pct: float,
+) -> tuple[np.ndarray, np.ndarray]:
     data = _feature_frame(df_features)
-    valid = data[feature_cols].notna().all(axis=1) & trade_labels[label_col].notna()
-    return data.loc[valid, feature_cols], trade_labels.loc[valid, label_col].astype(int)
+    stop_distance = data["atr"].astype(float) * atr_stop_multiplier
+    fallback_stop_distance = data["close"].astype(float) * fallback_stop_loss_pct
+    stop_distance = stop_distance.where(np.isfinite(stop_distance) & (stop_distance > 0), fallback_stop_distance)
+    take_distance = (
+        data["atr"].astype(float) * atr_take_profit_multiplier
+        if atr_take_profit_multiplier is not None
+        else stop_distance * min_rr
+    )
+    fallback_take_distance = data["close"].astype(float) * fallback_take_profit_pct
+    take_distance = take_distance.where(np.isfinite(take_distance) & (take_distance > 0), fallback_take_distance)
+    close = data["close"].astype(float).replace(0, np.nan)
+    return (stop_distance / close).to_numpy(dtype=float), (take_distance / close).to_numpy(dtype=float)
 
 
 def _positive_count(labels: pd.Series | None) -> int:
@@ -332,6 +367,7 @@ def xgboost_signal(
     - buy_threshold=0.58, sell_threshold=0.42 (configurable vía strategy_params)
     """
     strategy_params = strategy_params or {}
+    min_train_rows = int(strategy_params.get("min_train_rows", min_train_rows))
     threshold_pct = float(strategy_params.get("label_threshold_pct", 0.003))
     horizon_candles = int(strategy_params.get("horizon_candles", 1))
     buy_threshold = float(strategy_params.get("probability_buy_threshold", 0.58))
@@ -345,19 +381,51 @@ def xgboost_signal(
     label_commission_pct = float(strategy_params.get("commission_pct", 0.001))
     label_slippage_pct = float(strategy_params.get("slippage_pct", 0.0005))
     label_spread_pct = float(strategy_params.get("spread_pct", 0.0003))
+    min_rr = float(strategy_params.get("min_risk_reward", 1.5))
+    atr_stop_multiplier = float(strategy_params.get("atr_stop_multiplier", 1.5))
+    atr_take_profit_multiplier_value = strategy_params.get("atr_take_profit_multiplier")
+    atr_take_profit_multiplier = (
+        float(atr_take_profit_multiplier_value)
+        if atr_take_profit_multiplier_value is not None
+        else None
+    )
+    explicit_fixed_label_levels = "stop_loss_pct" in strategy_params or "take_profit_pct" in strategy_params
+    label_level_mode = str(
+        strategy_params.get(
+            "label_level_mode",
+            "fixed_pct" if explicit_fixed_label_levels else "atr",
+        )
+    )
     label_params = {
         "label_type": label_type,
+        "min_train_rows": min_train_rows if use_trade_labels else None,
+        "label_level_mode": label_level_mode if use_trade_labels else None,
         "label_stop_loss_pct": label_stop_loss_pct if use_trade_labels else None,
         "label_take_profit_pct": label_take_profit_pct if use_trade_labels else None,
         "label_horizon_candles": horizon_candles if use_trade_labels else None,
+        "label_atr_stop_multiplier": atr_stop_multiplier if use_trade_labels and label_level_mode == "atr" else None,
+        "label_atr_take_profit_multiplier": atr_take_profit_multiplier if use_trade_labels and label_level_mode == "atr" else None,
+        "label_min_risk_reward": min_rr if use_trade_labels and label_level_mode == "atr" else None,
         "label_costs": {
             "commission_pct": label_commission_pct,
             "slippage_pct": label_slippage_pct,
             "spread_pct": label_spread_pct,
         } if use_trade_labels else None,
-        "label_level_note": "fixed_pct_trade_labels_not_atr; costs_recorded_but_primary_label_is_tp_sl_touch" if use_trade_labels else None,
+        "label_level_note": (
+            "atr_aligned_trade_labels; costs_recorded_but_primary_label_is_tp_sl_touch"
+            if use_trade_labels and label_level_mode == "atr"
+            else "fixed_pct_trade_labels; costs_recorded_but_primary_label_is_tp_sl_touch"
+            if use_trade_labels
+            else None
+        ),
     }
     trade_diag = {
+        "raw_buy_label_count": 0,
+        "raw_sell_label_count": 0,
+        "raw_buy_positive_count": 0,
+        "raw_sell_positive_count": 0,
+        "feature_valid_count": 0,
+        "feature_nan_summary": {},
         "buy_label_count": 0,
         "sell_label_count": 0,
         "buy_positive_count": 0,
@@ -374,6 +442,9 @@ def xgboost_signal(
 
     data = _apply_sentiment_features(_feature_frame(df), sentiment_features)
     feature_cols = _feature_cols(sentiment_features)
+    if use_trade_labels:
+        trade_diag["feature_nan_summary"] = _feature_nan_summary(data, feature_cols)
+        trade_diag["feature_valid_count"] = int(data[feature_cols].notna().all(axis=1).sum())
     if len(data) < 2:
         return {
             "model_available": False,
@@ -391,6 +462,17 @@ def xgboost_signal(
         }
 
     if use_trade_labels:
+        label_stop_pcts = None
+        label_take_pcts = None
+        if label_level_mode == "atr":
+            label_stop_pcts, label_take_pcts = _atr_label_pcts(
+                data.iloc[:-1],
+                atr_stop_multiplier=atr_stop_multiplier,
+                min_rr=min_rr,
+                atr_take_profit_multiplier=atr_take_profit_multiplier,
+                fallback_stop_loss_pct=label_stop_loss_pct,
+                fallback_take_profit_pct=label_take_profit_pct,
+            )
         trade_labels = build_trade_outcome_labels(
             data.iloc[:-1],
             horizon_candles=horizon_candles,
@@ -399,11 +481,17 @@ def xgboost_signal(
             commission_pct=label_commission_pct,
             slippage_pct=label_slippage_pct,
             spread_pct=label_spread_pct,
+            stop_loss_pcts=label_stop_pcts,
+            take_profit_pcts=label_take_pcts,
         )
         buy_x, buy_y, sell_x, sell_y = _prepared_trade_dataset(data.iloc[:-1], trade_labels, feature_cols)
         x = buy_x
         y = buy_y
         trade_diag.update({
+            "raw_buy_label_count": int(trade_labels["buy_win"].notna().sum()),
+            "raw_sell_label_count": int(trade_labels["sell_win"].notna().sum()),
+            "raw_buy_positive_count": int((trade_labels["buy_win"] == 1).sum()),
+            "raw_sell_positive_count": int((trade_labels["sell_win"] == 1).sum()),
             "buy_label_count": int(len(buy_y)),
             "sell_label_count": int(len(sell_y)),
             "buy_positive_count": _positive_count(buy_y),
@@ -434,6 +522,36 @@ def xgboost_signal(
             "hold_reason": "model_unavailable" if use_trade_labels else None,
             **label_params,
         }
+    if use_trade_labels and int(trade_diag["raw_buy_label_count"]) < min_train_rows:
+        return {
+            "model_available": False,
+            "probability_up": None,
+            "signal": "HOLD",
+            "confidence": 25.0,
+            "validation_accuracy": None,
+            "walk_forward_accuracy": None,
+            "train_rows": int(len(buy_y)),
+            "reason": "insufficient_raw_buy_labels",
+            "label_type": label_type,
+            **trade_diag,
+            "hold_reason": "insufficient_raw_buy_labels",
+            **label_params,
+        }
+    if use_trade_labels and int(trade_diag["raw_sell_label_count"]) < min_train_rows:
+        return {
+            "model_available": False,
+            "probability_up": None,
+            "signal": "HOLD",
+            "confidence": 25.0,
+            "validation_accuracy": None,
+            "walk_forward_accuracy": None,
+            "train_rows": int(len(sell_y)),
+            "reason": "insufficient_raw_sell_labels",
+            "label_type": label_type,
+            **trade_diag,
+            "hold_reason": "insufficient_raw_sell_labels",
+            **label_params,
+        }
     if use_trade_labels and len(buy_y) < min_train_rows:
         return {
             "model_available": False,
@@ -443,7 +561,7 @@ def xgboost_signal(
             "validation_accuracy": None,
             "walk_forward_accuracy": None,
             "train_rows": int(len(buy_y)),
-            "reason": "insufficient_buy_labels",
+            "reason": "insufficient_buy_labels_after_feature_filter",
             "label_type": label_type,
             **trade_diag,
             "hold_reason": "insufficient_buy_labels",
@@ -458,7 +576,7 @@ def xgboost_signal(
             "validation_accuracy": None,
             "walk_forward_accuracy": None,
             "train_rows": int(len(sell_y)),
-            "reason": "insufficient_sell_labels",
+            "reason": "insufficient_sell_labels_after_feature_filter",
             "label_type": label_type,
             **trade_diag,
             "hold_reason": "insufficient_sell_labels",

@@ -105,6 +105,21 @@ def xgboost_diagnostic_result():
                 "entry_price": 100,
                 "input_features": {
                     "label_type": "trade_outcome_directional",
+                    "min_train_rows": 150,
+                    "label_level_mode": "atr",
+                    "label_horizon_candles": 4,
+                    "label_stop_loss_pct": 0.03,
+                    "label_take_profit_pct": 0.045,
+                    "label_atr_stop_multiplier": 1.5,
+                    "label_atr_take_profit_multiplier": None,
+                    "label_min_risk_reward": 1.5,
+                    "label_costs": {"commission_pct": 0.001, "slippage_pct": 0.0005, "spread_pct": 0.0003},
+                    "raw_buy_label_count": 150,
+                    "raw_sell_label_count": 148,
+                    "raw_buy_positive_count": 40,
+                    "raw_sell_positive_count": 38,
+                    "feature_valid_count": 130,
+                    "feature_nan_summary": {"rsi": 14, "macd_hist": 33},
                     "probability_buy_win": 0.41,
                     "probability_sell_win": 0.38,
                     "buy_label_count": 120,
@@ -121,6 +136,21 @@ def xgboost_diagnostic_result():
                 "entry_price": 101,
                 "input_features": {
                     "label_type": "trade_outcome_directional",
+                    "min_train_rows": 150,
+                    "label_level_mode": "atr",
+                    "label_horizon_candles": 4,
+                    "label_stop_loss_pct": 0.03,
+                    "label_take_profit_pct": 0.045,
+                    "label_atr_stop_multiplier": 1.5,
+                    "label_atr_take_profit_multiplier": None,
+                    "label_min_risk_reward": 1.5,
+                    "label_costs": {"commission_pct": 0.001, "slippage_pct": 0.0005, "spread_pct": 0.0003},
+                    "raw_buy_label_count": 130,
+                    "raw_sell_label_count": 128,
+                    "raw_buy_positive_count": 20,
+                    "raw_sell_positive_count": 18,
+                    "feature_valid_count": 110,
+                    "feature_nan_summary": {"rsi": 14, "macd_hist": 33},
                     "probability_buy_win": 0.35,
                     "probability_sell_win": 0.33,
                     "buy_label_count": 100,
@@ -366,15 +396,42 @@ class HistoricalExperimentTests(unittest.IsolatedAsyncioTestCase):
             "use_sentiment": False,
             "use_trade_labels": True,
             "horizon_candles": 4,
+            "min_train_rows": 150,
             "commission_pct": 0.001,
             "slippage_pct": 0.0005,
             "spread_pct": 0.0003,
         })
+        self.assertGreaterEqual(replay.call_args.kwargs["min_history"], 116)
         self.assertTrue(report["config"]["use_trade_labels"])
+        self.assertEqual(report["config"]["trade_label_min_train_rows"], 150)
         self.assertTrue(report["runs"][0]["use_trade_labels"])
         self.assertTrue(report["summary"][0]["use_trade_labels"])
         self.assertIn("use_trade_labels", csv_text)
         self.assertIn("true", csv_text.lower())
+
+    async def test_trade_label_replay_uses_recent_windows_with_enough_history(self):
+        import scripts.run_historical_experiments as script
+
+        replay_result = {
+            "predictions": [],
+            "outcomes": [],
+            "metrics": [],
+            "assumptions": {},
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.object(script, "fetch_binance_klines", new=AsyncMock(return_value=synthetic_candles(600))):
+                with patch.object(script, "run_historical_replay", return_value=replay_result) as replay:
+                    await script.run_experiments(
+                        symbols=["BTC"],
+                        timeframes=["1h"],
+                        strategy_modes=["xgboost"],
+                        max_predictions=80,
+                        reports_dir=tmp,
+                        use_trade_labels=True,
+                    )
+
+        self.assertEqual(replay.call_args.kwargs["min_history"], 516)
+        self.assertEqual(replay.call_args.kwargs["strategy_params"]["min_train_rows"], 150)
 
     async def test_historical_report_includes_sentiment_disabled_note(self):
         import scripts.run_historical_experiments as script
@@ -416,6 +473,16 @@ class HistoricalExperimentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(row["max_probability_sell_win"], 0.38)
         self.assertEqual(row["avg_buy_label_count"], 110)
         self.assertEqual(row["avg_sell_positive_rate"], 0.16)
+        self.assertEqual(row["raw_buy_label_count"], 140)
+        self.assertEqual(row["raw_sell_label_count"], 138)
+        self.assertEqual(row["raw_buy_positive_count"], 30)
+        self.assertEqual(row["raw_sell_positive_count"], 28)
+        self.assertEqual(row["feature_valid_count"], 120)
+        self.assertEqual(row["feature_nan_summary"], {"rsi": 28, "macd_hist": 66})
+        self.assertEqual(row["label_level_mode"], "atr")
+        self.assertEqual(row["label_horizon_candles"], 4)
+        self.assertEqual(row["label_params"]["min_train_rows"], 150)
+        self.assertEqual(row["label_params"]["label_costs"]["spread_pct"], 0.0003)
 
     async def test_requirements_does_not_include_unused_lightgbm(self):
         content = Path("requirements.txt").read_text(encoding="utf-8").lower()
