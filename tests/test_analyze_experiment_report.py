@@ -19,6 +19,7 @@ def base_row(**overrides):
         "strategy_mode": "xgboost",
         "use_trade_labels": "true",
         "label_type": "trade_outcome_directional",
+        "trade_label_scheme": "touch_only",
         "label_level_mode": "atr",
         "label_horizon_candles": "4",
         "total_predictions": "200",
@@ -110,6 +111,17 @@ class AnalyzeExperimentReportTests(unittest.TestCase):
         self.assertIn("TRADEAI Research Summary", markdown)
         self.assertIn("BTC 15m", markdown)
         self.assertIn("REJECT", markdown)
+
+    def test_hybrid_scheme_is_named_in_combo_and_recommendations(self):
+        row = normalize_row(base_row(
+            label_type="hybrid_touch_or_expiry",
+            trade_label_scheme="hybrid_touch_or_expiry",
+        ))
+        summary = analyze_report([row], {"source": "sample.csv"})
+        analysis = summary["analyses"][0]
+
+        self.assertIn("hybrid_touch_or_expiry", analysis["combo"])
+        self.assertTrue(any("experimental" in item for item in analysis["recommendations"]))
 
     def test_does_not_fail_with_missing_optional_columns(self):
         row = normalize_row({

@@ -414,6 +414,7 @@ class HistoricalExperimentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(replay.call_args.kwargs["strategy_params"], {
             "use_sentiment": False,
             "use_trade_labels": True,
+            "trade_label_scheme": "touch_only",
             "horizon_candles": 4,
             "min_train_rows": 150,
             "commission_pct": 0.001,
@@ -422,6 +423,7 @@ class HistoricalExperimentTests(unittest.IsolatedAsyncioTestCase):
         })
         self.assertGreaterEqual(replay.call_args.kwargs["min_history"], 116)
         self.assertTrue(report["config"]["use_trade_labels"])
+        self.assertEqual(report["config"]["trade_label_scheme"], "touch_only")
         self.assertEqual(report["config"]["trade_label_min_train_rows"], 150)
         self.assertTrue(report["runs"][0]["use_trade_labels"])
         self.assertTrue(report["summary"][0]["use_trade_labels"])
@@ -476,6 +478,30 @@ class HistoricalExperimentTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("probability_buy_win", trades_csv)
             self.assertIn("WIN", trades_csv)
             self.assertTrue(report["config"]["save_trades"])
+
+    async def test_trade_label_scheme_is_configurable(self):
+        import scripts.run_historical_experiments as script
+
+        replay_result = {
+            "predictions": [],
+            "outcomes": [],
+            "metrics": [],
+            "assumptions": {},
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.object(script, "fetch_binance_klines", new=AsyncMock(return_value=synthetic_candles(600))):
+                with patch.object(script, "run_historical_replay", return_value=replay_result) as replay:
+                    report = await script.run_experiments(
+                        symbols=["BTC"],
+                        timeframes=["15m"],
+                        strategy_modes=["xgboost"],
+                        reports_dir=tmp,
+                        use_trade_labels=True,
+                        trade_label_scheme="hybrid_touch_or_expiry",
+                    )
+
+        self.assertEqual(replay.call_args.kwargs["strategy_params"]["trade_label_scheme"], "hybrid_touch_or_expiry")
+        self.assertEqual(report["config"]["trade_label_scheme"], "hybrid_touch_or_expiry")
 
     async def test_trade_label_replay_uses_recent_windows_with_enough_history(self):
         import scripts.run_historical_experiments as script

@@ -211,6 +211,32 @@ class MLEngineTests(unittest.TestCase):
         self.assertTrue(np.isnan(labels.iloc[0]["buy_win"]))
         self.assertTrue(np.isnan(labels.iloc[0]["sell_win"]))
 
+    def test_hybrid_touch_or_expiry_labels_expired_by_net_return(self):
+        idx = pd.date_range("2026-01-01", periods=3, freq="h", tz="UTC")
+        df = pd.DataFrame({
+            "timestamp": idx,
+            "open": [100, 100, 100],
+            "high": [100, 102, 100],
+            "low": [100, 99, 100],
+            "close": [100, 101, 100],
+            "volume": [1000, 1000, 1000],
+        })
+
+        labels = build_trade_outcome_labels(
+            df,
+            horizon_candles=1,
+            stop_loss_pct=0.05,
+            take_profit_pct=0.05,
+            commission_pct=0,
+            slippage_pct=0,
+            spread_pct=0,
+            label_scheme="hybrid_touch_or_expiry",
+            expiry_return_threshold_pct=0.05,
+        )
+
+        self.assertEqual(labels.iloc[0]["buy_win"], 1.0)
+        self.assertEqual(labels.iloc[0]["sell_win"], 0.0)
+
     def test_trade_labels_values_are_only_binary_or_nan(self):
         labels = build_trade_outcome_labels(
             sample_candles(120),
@@ -344,7 +370,26 @@ class MLEngineTests(unittest.TestCase):
         )
 
         self.assertEqual(result["label_level_mode"], "atr")
+        self.assertEqual(result["trade_label_scheme"], "touch_only")
         self.assertIn("atr_aligned_trade_labels", result["label_level_note"])
+
+    def test_xgboost_trade_labels_support_hybrid_touch_or_expiry_scheme(self):
+        features = add_features(sample_candles(300))
+        result = xgboost_signal(
+            features,
+            min_train_rows=30,
+            strategy_params={
+                "use_trade_labels": True,
+                "trade_label_scheme": "hybrid_touch_or_expiry",
+                "horizon_candles": 4,
+                "commission_pct": 0,
+                "slippage_pct": 0,
+            },
+        )
+
+        self.assertEqual(result["label_type"], "hybrid_touch_or_expiry")
+        self.assertEqual(result["trade_label_scheme"], "hybrid_touch_or_expiry")
+        self.assertEqual(result["expiry_return_threshold_pct"], 0.05)
 
     def test_xgboost_trade_label_hold_includes_hold_reason(self):
         features = add_features(sample_candles(300))
