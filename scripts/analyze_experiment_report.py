@@ -206,6 +206,52 @@ def analyze_trade_calibration(trades: list[dict[str, Any]]) -> dict[str, Any]:
     return analyses
 
 
+def analyze_evaluation_integrity(trades: list[dict[str, Any]]) -> dict[str, Any]:
+    """Audit outcome/return consistency in per-trade reports."""
+    summary = {
+        "checked_trades": 0,
+        "win_nonpositive_return_count": 0,
+        "loss_nonnegative_return_count": 0,
+        "has_issues": False,
+        "by_combo": {},
+    }
+    by_combo: dict[tuple[str, str, str, str, str, str], dict[str, Any]] = {}
+    for row in trades:
+        outcome = str(row.get("outcome") or "").upper()
+        if outcome not in {"WIN", "LOSS"}:
+            continue
+        ret = parse_float(row.get("return_pct"))
+        key = combo_key(row)
+        combo = by_combo.setdefault(key, {
+            "symbol": key[0],
+            "timeframe": key[1],
+            "strategy_mode": key[2],
+            "use_trade_labels": key[3],
+            "trade_label_scheme": key[4],
+            "label_type": key[5],
+            "checked_trades": 0,
+            "win_nonpositive_return_count": 0,
+            "loss_nonnegative_return_count": 0,
+        })
+        summary["checked_trades"] += 1
+        combo["checked_trades"] += 1
+        if outcome == "WIN" and ret <= 0:
+            summary["win_nonpositive_return_count"] += 1
+            combo["win_nonpositive_return_count"] += 1
+        if outcome == "LOSS" and ret >= 0:
+            summary["loss_nonnegative_return_count"] += 1
+            combo["loss_nonnegative_return_count"] += 1
+    summary["has_issues"] = bool(
+        summary["win_nonpositive_return_count"] or summary["loss_nonnegative_return_count"]
+    )
+    summary["by_combo"] = {
+        "|".join(key): value
+        for key, value in by_combo.items()
+        if value["win_nonpositive_return_count"] or value["loss_nonnegative_return_count"]
+    }
+    return summary
+
+
 def classify_row(row: dict[str, Any]) -> str:
     warnings = str(row.get("warnings") or "").lower()
     evaluated = row["evaluated_predictions"]
@@ -427,6 +473,7 @@ def analyze_report(
         "classification_counts": counts,
         "analyses": analyses,
         "calibration": analyze_trade_calibration(trades or []),
+        "evaluation_integrity": analyze_evaluation_integrity(trades or []),
         "global_recommendations": [
             "Do not move any rejected configuration to paper trading.",
             "Next useful experiment: compare current trade_outcome_directional labels against expiry-aware labels.",
@@ -494,6 +541,25 @@ def render_markdown(summary: dict[str, Any]) -> str:
                     "- Warning: high predicted probability buckets still have negative average returns; calibration/target alignment is suspect."
                 )
             lines.append("")
+    integrity = summary.get("evaluation_integrity") or {}
+    if integrity.get("checked_trades"):
+        lines.extend(["## Evaluation Integrity", ""])
+        lines.append(f"- Checked WIN/LOSS trades: {integrity['checked_trades']}")
+        lines.append(f"- WIN with return_pct <= 0: {integrity['win_nonpositive_return_count']}")
+        lines.append(f"- LOSS with return_pct >= 0: {integrity['loss_nonnegative_return_count']}")
+        if integrity.get("has_issues"):
+            lines.append("- WARNING: outcome/return sign inconsistency detected. Do not trust PnL metrics from this report until re-run with the fixed evaluator.")
+            lines.append("")
+            lines.append("| Combination | WIN <= 0 | LOSS >= 0 | Checked |")
+            lines.append("| --- | ---: | ---: | ---: |")
+            for combo, values in integrity.get("by_combo", {}).items():
+                lines.append(
+                    f"| {combo} | {values['win_nonpositive_return_count']} | "
+                    f"{values['loss_nonnegative_return_count']} | {values['checked_trades']} |"
+                )
+        else:
+            lines.append("- No outcome/return sign inconsistencies detected.")
+        lines.append("")
     return "\n".join(lines)
 
 
@@ -534,6 +600,19 @@ def print_terminal_summary(summary: dict[str, Any]) -> None:
                     f"win={metrics['realized_win_rate']:.2f}% "
                     f"avg_return={metrics['average_return']:.6f}"
                 )
+        print()
+    integrity = summary.get("evaluation_integrity") or {}
+    if integrity.get("checked_trades"):
+        print("Evaluation integrity")
+        print(
+            f"  checked={integrity['checked_trades']} "
+            f"win_return<=0={integrity['win_nonpositive_return_count']} "
+            f"loss_return>=0={integrity['loss_nonnegative_return_count']}"
+        )
+        if integrity.get("has_issues"):
+            print("  WARNING: outcome/return sign inconsistency detected; re-run experiments with fixed evaluator.")
+        else:
+            print("  OK: no outcome/return sign inconsistencies detected.")
         print()
 
 

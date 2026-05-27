@@ -3,6 +3,7 @@ import unittest
 from pathlib import Path
 
 from scripts.analyze_experiment_report import (
+    analyze_evaluation_integrity,
     analyze_trade_calibration,
     analyze_report,
     classify_row,
@@ -210,6 +211,57 @@ class AnalyzeExperimentReportTests(unittest.TestCase):
             rows = load_trades_report(path)
 
         self.assertEqual(rows[0]["symbol"], "BTC")
+
+    def test_evaluation_integrity_detects_win_with_nonpositive_return(self):
+        trades = [{
+            "symbol": "BTC",
+            "timeframe": "15m",
+            "strategy_mode": "xgboost",
+            "use_trade_labels": "true",
+            "trade_label_scheme": "touch_only",
+            "label_type": "trade_outcome_directional",
+            "outcome": "WIN",
+            "return_pct": "-0.01",
+        }]
+
+        integrity = analyze_evaluation_integrity(trades)
+
+        self.assertTrue(integrity["has_issues"])
+        self.assertEqual(integrity["win_nonpositive_return_count"], 1)
+
+    def test_evaluation_integrity_detects_loss_with_nonnegative_return(self):
+        trades = [{
+            "symbol": "BTC",
+            "timeframe": "15m",
+            "strategy_mode": "xgboost",
+            "use_trade_labels": "true",
+            "trade_label_scheme": "touch_only",
+            "label_type": "trade_outcome_directional",
+            "outcome": "LOSS",
+            "return_pct": "0.01",
+        }]
+
+        integrity = analyze_evaluation_integrity(trades)
+
+        self.assertTrue(integrity["has_issues"])
+        self.assertEqual(integrity["loss_nonnegative_return_count"], 1)
+
+    def test_markdown_includes_evaluation_integrity_warning(self):
+        trades = [{
+            "symbol": "BTC",
+            "timeframe": "15m",
+            "strategy_mode": "xgboost",
+            "use_trade_labels": "true",
+            "trade_label_scheme": "touch_only",
+            "label_type": "trade_outcome_directional",
+            "outcome": "WIN",
+            "return_pct": "-0.01",
+        }]
+        summary = analyze_report([normalize_row(base_row())], {"source": "sample.csv"}, trades=trades)
+        markdown = render_markdown(summary)
+
+        self.assertIn("Evaluation Integrity", markdown)
+        self.assertIn("WARNING", markdown)
 
 
 if __name__ == "__main__":

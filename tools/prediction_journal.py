@@ -162,31 +162,78 @@ def evaluate_prediction_against_candles(
         return build_invalid_or_expired_outcome(pred, path, signal)
 
     entry = pred["entry_price"]
-    exit_price = float(path.iloc[-1]["close"])
     highs = path["high"].astype(float)
     lows = path["low"].astype(float)
 
-    ambiguous_intrabar = False
+    final_close = float(path.iloc[-1]["close"])
+    exit_price = final_close
+    exit_reason = "expired_close"
+    exit_candle_index = len(path) - 1
+    exit_candle_time = path.index[-1].isoformat()
+    hit_sl = False
+    hit_tp = False
+    notes = []
+
     if signal == "BUY":
         best_price = float(highs.max())
         worst_price = float(lows.min())
-        return_pct = (exit_price - entry) / entry * 100
         mfe = (best_price - entry) / entry * 100
         mae = (entry - worst_price) / entry * 100
-        hit_sl = pred["stop_loss"] is not None and bool((lows <= pred["stop_loss"]).any())
-        hit_tp = pred["take_profit"] is not None and bool((highs >= pred["take_profit"]).any())
-        if pred["stop_loss"] is not None and pred["take_profit"] is not None:
-            ambiguous_intrabar = bool(((lows <= pred["stop_loss"]) & (highs >= pred["take_profit"])).any())
+        for candle_index, (ts, row) in enumerate(path.iterrows()):
+            candle_hit_sl = pred["stop_loss"] is not None and float(row["low"]) <= pred["stop_loss"]
+            candle_hit_tp = pred["take_profit"] is not None and float(row["high"]) >= pred["take_profit"]
+            hit_sl = hit_sl or candle_hit_sl
+            hit_tp = hit_tp or candle_hit_tp
+            if candle_hit_sl and candle_hit_tp:
+                exit_price = float(pred["stop_loss"])
+                exit_reason = "ambiguous_intrabar_conservative_loss"
+                exit_candle_index = candle_index
+                exit_candle_time = ts.isoformat()
+                notes.append("ambiguous_intrabar_conservative_loss")
+                break
+            if candle_hit_sl:
+                exit_price = float(pred["stop_loss"])
+                exit_reason = "stop_loss"
+                exit_candle_index = candle_index
+                exit_candle_time = ts.isoformat()
+                break
+            if candle_hit_tp:
+                exit_price = float(pred["take_profit"])
+                exit_reason = "take_profit"
+                exit_candle_index = candle_index
+                exit_candle_time = ts.isoformat()
+                break
+        return_pct = (exit_price - entry) / entry * 100
     elif signal == "SELL":
         best_price = float(lows.min())
         worst_price = float(highs.max())
-        return_pct = (entry - exit_price) / entry * 100
         mfe = (entry - best_price) / entry * 100
         mae = (worst_price - entry) / entry * 100
-        hit_sl = pred["stop_loss"] is not None and bool((highs >= pred["stop_loss"]).any())
-        hit_tp = pred["take_profit"] is not None and bool((lows <= pred["take_profit"]).any())
-        if pred["stop_loss"] is not None and pred["take_profit"] is not None:
-            ambiguous_intrabar = bool(((highs >= pred["stop_loss"]) & (lows <= pred["take_profit"])).any())
+        for candle_index, (ts, row) in enumerate(path.iterrows()):
+            candle_hit_sl = pred["stop_loss"] is not None and float(row["high"]) >= pred["stop_loss"]
+            candle_hit_tp = pred["take_profit"] is not None and float(row["low"]) <= pred["take_profit"]
+            hit_sl = hit_sl or candle_hit_sl
+            hit_tp = hit_tp or candle_hit_tp
+            if candle_hit_sl and candle_hit_tp:
+                exit_price = float(pred["stop_loss"])
+                exit_reason = "ambiguous_intrabar_conservative_loss"
+                exit_candle_index = candle_index
+                exit_candle_time = ts.isoformat()
+                notes.append("ambiguous_intrabar_conservative_loss")
+                break
+            if candle_hit_sl:
+                exit_price = float(pred["stop_loss"])
+                exit_reason = "stop_loss"
+                exit_candle_index = candle_index
+                exit_candle_time = ts.isoformat()
+                break
+            if candle_hit_tp:
+                exit_price = float(pred["take_profit"])
+                exit_reason = "take_profit"
+                exit_candle_index = candle_index
+                exit_candle_time = ts.isoformat()
+                break
+        return_pct = (entry - exit_price) / entry * 100
     else:
         return build_invalid_or_expired_outcome(pred, path, signal)
 
@@ -195,13 +242,18 @@ def evaluate_prediction_against_candles(
     spread_cost = abs(entry + exit_price) * (spread_pct / 2)
     net_return_pct = return_pct - ((fees_paid + slippage_cost + spread_cost) / entry * 100)
 
-    notes = []
-    if ambiguous_intrabar:
+    if exit_reason == "ambiguous_intrabar_conservative_loss":
         outcome = "LOSS"
-        notes.append("ambiguous_intrabar_conservative_loss")
-    elif hit_tp and not hit_sl:
-        outcome = "WIN"
-    elif hit_sl and not hit_tp:
+    elif exit_reason == "take_profit":
+        if net_return_pct > 0:
+            outcome = "WIN"
+        elif net_return_pct < 0:
+            outcome = "LOSS"
+            notes.append("take_profit_net_loss_after_costs")
+        else:
+            outcome = "BREAKEVEN"
+            notes.append("take_profit_net_breakeven_after_costs")
+    elif exit_reason == "stop_loss":
         outcome = "LOSS"
     elif path.index[-1] >= horizon_end:
         outcome = "EXPIRED"
@@ -211,6 +263,10 @@ def evaluate_prediction_against_candles(
         outcome = "LOSS"
     else:
         outcome = "BREAKEVEN"
+    if outcome == "WIN" and net_return_pct <= 0:
+        notes.append("win_net_nonpositive_after_costs")
+    if outcome == "LOSS" and net_return_pct >= 0:
+        notes.append("loss_net_nonnegative_after_costs")
 
     return {
         "id": str(uuid4()),
@@ -228,6 +284,14 @@ def evaluate_prediction_against_candles(
         "raw_path": {
             "candles": candles_to_raw_path(path),
             "notes": notes,
+            "exit_price": round(exit_price, 8),
+            "exit_reason": exit_reason,
+            "exit_candle_index": exit_candle_index,
+            "exit_candle_time": exit_candle_time,
+            "tp_hit": hit_tp,
+            "sl_hit": hit_sl,
+            "expired": outcome == "EXPIRED",
+            "return_pct": round(net_return_pct, 8),
             "costs": {"commission_pct": commission_pct, "slippage_pct": slippage_pct, "spread_pct": spread_pct},
         },
     }
