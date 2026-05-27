@@ -19,7 +19,13 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from tools.historical_data import fetch_binance_klines
+from tools.historical_data import (
+    cache_path_for_ohlcv,
+    classify_historical_data_error,
+    fetch_binance_klines,
+    load_ohlcv_cache,
+    save_ohlcv_cache,
+)
 from tools.historical_replay import run_historical_replay
 from tools.prediction_journal import PredictionStore, calculate_profit_factor
 
@@ -33,6 +39,7 @@ DEFAULT_MAX_CANDLES = 500
 DEFAULT_MAX_PREDICTIONS = 100
 DEFAULT_TRADE_LABEL_MIN_TRAIN_ROWS = 150
 DEFAULT_TRADE_LABEL_SCHEME = "touch_only"
+DEFAULT_CACHE_DIR = PROJECT_ROOT / "data" / "historical"
 ALLOWED_TRADE_LABEL_SCHEMES = {"touch_only", "hybrid_touch_or_expiry"}
 HISTORICAL_SENTIMENT_USED = False
 HISTORICAL_SENTIMENT_NOTE = "Fear & Greed current value disabled for historical replay to avoid time leakage."
@@ -43,11 +50,64 @@ MIN_EVALUATION_CANDLES_BY_INTERVAL_MINUTES = {
 
 
 def format_historical_data_error(exc: Exception) -> str:
+    category = classify_historical_data_error(exc)
     exc_type = exc.__class__.__name__
     status_code = getattr(getattr(exc, "response", None), "status_code", None)
     if status_code is not None:
-        return f"historical_data_error: {exc_type}: HTTP {status_code}: {exc}"
-    return f"historical_data_error: {exc_type}: {exc}"
+        return f"historical_data_error[{category}]: {exc_type}: HTTP {status_code}: {exc}"
+    return f"historical_data_error[{category}]: {exc_type}: {exc}"
+
+
+async def load_experiment_candles(
+    symbol: str,
+    timeframe: str,
+    max_candles: int,
+    use_cache: bool = False,
+    refresh_cache: bool = False,
+    cache_dir: str | Path = DEFAULT_CACHE_DIR,
+) -> dict[str, Any]:
+    cache_path = cache_path_for_ohlcv(symbol, timeframe, max_candles, cache_dir=cache_dir)
+    cache_warning = ""
+    if use_cache and not refresh_cache:
+        try:
+            candles = load_ohlcv_cache(cache_path, limit=max_candles)
+            return {
+                "candles": candles,
+                "data_source": "cache",
+                "data_cache_path": str(cache_path),
+                "data_warning": "",
+            }
+        except FileNotFoundError:
+            pass
+        except Exception as exc:  # noqa: BLE001 - cache invalidity should not block a fresh fetch.
+            cache_warning = f"cache_read_error[{classify_historical_data_error(exc)}]: {exc}"
+
+    try:
+        candles = await fetch_binance_klines(symbol, timeframe, limit=max_candles)
+        if use_cache:
+            save_ohlcv_cache(candles, cache_path)
+        return {
+            "candles": candles,
+            "data_source": "network",
+            "data_cache_path": str(cache_path) if use_cache else "",
+            "data_warning": cache_warning,
+        }
+    except Exception as exc:
+        if use_cache:
+            try:
+                candles = load_ohlcv_cache(cache_path, limit=max_candles)
+                warning_parts = [f"historical_data_cache_fallback: {format_historical_data_error(exc)}"]
+                if cache_warning:
+                    warning_parts.append(cache_warning)
+                return {
+                    "candles": candles,
+                    "data_source": "cache_fallback",
+                    "data_cache_path": str(cache_path),
+                    "data_warning": "; ".join(warning_parts),
+                }
+            except Exception:
+                pass
+        raise
 
 
 def interval_to_minutes(interval: str) -> int:
@@ -380,6 +440,9 @@ def summarize_run(
     sentiment_used: bool = HISTORICAL_SENTIMENT_USED,
     sentiment_note: str = HISTORICAL_SENTIMENT_NOTE,
     use_trade_labels: bool = False,
+    data_source: str | None = None,
+    data_cache_path: str | None = None,
+    data_warning: str | None = None,
 ) -> dict[str, Any]:
     metric = first_metric(result or {})
     outcomes = (result or {}).get("outcomes") or []
@@ -390,6 +453,8 @@ def summarize_run(
         warnings.append(str(assumptions["error"]))
     if error:
         warnings.append(error)
+    if data_warning:
+        warnings.append(data_warning)
 
     row = {
         "symbol": symbol,
@@ -401,6 +466,8 @@ def summarize_run(
         "sentiment_used": sentiment_used,
         "sentiment_note": sentiment_note,
         "use_trade_labels": bool(use_trade_labels),
+        "data_source": data_source or "",
+        "data_cache_path": data_cache_path or "",
         "total_predictions": len((result or {}).get("predictions") or []),
         "evaluated_predictions": metric.get("evaluated_predictions", len(outcomes)),
         "win_rate": metric.get("win_rate", 0),
@@ -428,6 +495,9 @@ async def run_experiments(
     use_trade_labels: bool = False,
     save_trades: bool = False,
     trade_label_scheme: str = DEFAULT_TRADE_LABEL_SCHEME,
+    use_cache: bool = False,
+    refresh_cache: bool = False,
+    cache_dir: str | Path = DEFAULT_CACHE_DIR,
 ) -> dict[str, Any]:
     if trade_label_scheme not in ALLOWED_TRADE_LABEL_SCHEMES:
         raise ValueError(f"Unsupported trade_label_scheme: {trade_label_scheme}")
@@ -464,8 +534,22 @@ async def run_experiments(
                     f"evaluation_horizon_candles={replay_horizon_candles}"
                 )
             candles = None
+            data_source = ""
+            data_cache_path = ""
+            data_warning = ""
             try:
-                candles = await fetch_binance_klines(symbol, timeframe, limit=max_candles)
+                loaded = await load_experiment_candles(
+                    symbol,
+                    timeframe,
+                    max_candles=max_candles,
+                    use_cache=use_cache,
+                    refresh_cache=refresh_cache,
+                    cache_dir=cache_dir,
+                )
+                candles = loaded["candles"]
+                data_source = loaded.get("data_source", "")
+                data_cache_path = loaded.get("data_cache_path", "")
+                data_warning = loaded.get("data_warning", "")
             except Exception as exc:
                 error = format_historical_data_error(exc)
                 for strategy_mode in strategy_modes:
@@ -479,6 +563,8 @@ async def run_experiments(
                             effective_horizon_minutes_value=replay_horizon_minutes,
                             evaluation_horizon_candles=replay_horizon_candles,
                             use_trade_labels=use_trade_labels,
+                            data_source="error",
+                            data_cache_path=str(cache_path_for_ohlcv(symbol, timeframe, max_candles, cache_dir=cache_dir)) if use_cache else "",
                         )
                     )
                 continue
@@ -512,6 +598,9 @@ async def run_experiments(
                             effective_horizon_minutes_value=replay_horizon_minutes,
                             evaluation_horizon_candles=replay_horizon_candles,
                             use_trade_labels=use_trade_labels,
+                            data_source=data_source,
+                            data_cache_path=data_cache_path,
+                            data_warning=data_warning,
                         )
                     )
                     raw_runs.append({
@@ -524,6 +613,9 @@ async def run_experiments(
                         "sentiment_used": HISTORICAL_SENTIMENT_USED,
                         "sentiment_note": HISTORICAL_SENTIMENT_NOTE,
                         "use_trade_labels": use_trade_labels,
+                        "data_source": data_source,
+                        "data_cache_path": data_cache_path,
+                        "data_warning": data_warning,
                         "min_history": replay_min_history,
                         "assumptions": result.get("assumptions", {}),
                         "metrics": result.get("metrics", []),
@@ -549,6 +641,9 @@ async def run_experiments(
                             effective_horizon_minutes_value=replay_horizon_minutes,
                             evaluation_horizon_candles=replay_horizon_candles,
                             use_trade_labels=use_trade_labels,
+                            data_source=data_source,
+                            data_cache_path=data_cache_path,
+                            data_warning=data_warning,
                         )
                     )
 
@@ -569,6 +664,9 @@ async def run_experiments(
             "trade_label_min_train_rows": DEFAULT_TRADE_LABEL_MIN_TRAIN_ROWS if use_trade_labels else None,
             "save_trades": save_trades,
             "persist": persist,
+            "use_cache": use_cache,
+            "refresh_cache": refresh_cache,
+            "cache_dir": str(cache_dir),
         },
         "summary": summaries,
         "runs": raw_runs,
@@ -594,6 +692,7 @@ def write_report(report: dict[str, Any], reports_dir: str | Path = "reports", sa
         "requested_horizon_minutes", "effective_horizon_minutes",
         "evaluation_horizon_candles", "sentiment_used", "sentiment_note",
         "use_trade_labels",
+        "data_source", "data_cache_path",
         "evaluated_predictions", "win_rate", "average_return",
         "total_return_pct", "profit_factor", "max_drawdown", "sharpe",
         "invalid_count", "buy_count", "sell_count", "hold_count",
@@ -656,6 +755,7 @@ def print_summary(rows: list[dict[str, Any]]) -> None:
         "symbol", "timeframe", "strategy_mode", "total_predictions",
         "requested_horizon_minutes", "effective_horizon_minutes",
         "evaluation_horizon_candles", "sentiment_used", "use_trade_labels",
+        "data_source",
         "evaluated_predictions", "win_rate", "average_return",
         "total_return_pct", "profit_factor", "max_drawdown", "sharpe",
         "invalid_count", "buy_count", "sell_count", "hold_count",
@@ -692,6 +792,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--use-trade-labels", action="store_true")
     parser.add_argument("--save-trades", action="store_true")
     parser.add_argument("--trade-label-scheme", choices=sorted(ALLOWED_TRADE_LABEL_SCHEMES), default=DEFAULT_TRADE_LABEL_SCHEME)
+    parser.add_argument("--cache-dir", default=str(DEFAULT_CACHE_DIR))
+    parser.add_argument("--no-cache", action="store_false", dest="use_cache", default=True)
+    parser.add_argument("--refresh-cache", action="store_true")
     return parser
 
 
@@ -708,6 +811,9 @@ async def main() -> None:
         use_trade_labels=args.use_trade_labels,
         save_trades=args.save_trades,
         trade_label_scheme=args.trade_label_scheme,
+        use_cache=args.use_cache,
+        refresh_cache=args.refresh_cache,
+        cache_dir=args.cache_dir,
     )
     print_summary(report["summary"])
     print(f"JSON report: {report['report_paths']['json']}")

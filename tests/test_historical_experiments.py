@@ -228,6 +228,52 @@ class HistoricalExperimentTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("historical_data_error", by_symbol["ETH"]["warnings"])
         self.assertGreaterEqual(by_symbol["BTC"]["total_predictions"], 1)
 
+    async def test_uses_cached_candles_when_cache_enabled(self):
+        import scripts.run_historical_experiments as script
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_dir = Path(tmp) / "cache"
+            cache_path = script.cache_path_for_ohlcv("BTC", "15m", 180, cache_dir=cache_dir)
+            script.save_ohlcv_cache(synthetic_candles(180), cache_path)
+            with patch.object(script, "fetch_binance_klines", new=AsyncMock(side_effect=AssertionError("network should not be used"))):
+                report = await script.run_experiments(
+                    symbols=["BTC"],
+                    timeframes=["15m"],
+                    strategy_modes=["deterministic"],
+                    max_candles=180,
+                    max_predictions=2,
+                    reports_dir=tmp,
+                    use_cache=True,
+                    cache_dir=cache_dir,
+                )
+
+        self.assertEqual(report["summary"][0]["data_source"], "cache")
+        self.assertIn("BTCUSDT_15m_180", report["summary"][0]["data_cache_path"])
+
+    async def test_falls_back_to_cache_when_network_fails(self):
+        import scripts.run_historical_experiments as script
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_dir = Path(tmp) / "cache"
+            cache_path = script.cache_path_for_ohlcv("BTC", "15m", 180, cache_dir=cache_dir)
+            script.save_ohlcv_cache(synthetic_candles(180), cache_path)
+            with patch.object(script, "fetch_binance_klines", new=AsyncMock(side_effect=RuntimeError("[Errno 11001] getaddrinfo failed"))):
+                report = await script.run_experiments(
+                    symbols=["BTC"],
+                    timeframes=["15m"],
+                    strategy_modes=["deterministic"],
+                    max_candles=180,
+                    max_predictions=2,
+                    reports_dir=tmp,
+                    use_cache=True,
+                    refresh_cache=True,
+                    cache_dir=cache_dir,
+                )
+
+        self.assertEqual(report["summary"][0]["data_source"], "cache_fallback")
+        self.assertIn("historical_data_cache_fallback", report["summary"][0]["warnings"])
+        self.assertIn("dns_resolution", report["summary"][0]["warnings"])
+
     async def test_respects_max_predictions(self):
         import scripts.run_historical_experiments as script
 
@@ -277,7 +323,7 @@ class HistoricalExperimentTests(unittest.IsolatedAsyncioTestCase):
             "symbol", "timeframe", "strategy_mode", "total_predictions",
             "evaluated_predictions", "win_rate", "average_return",
             "total_return_pct", "profit_factor", "max_drawdown", "sharpe",
-            "invalid_count", "warnings",
+            "invalid_count", "data_source", "data_cache_path", "warnings",
         ]:
             self.assertIn(key, row)
 

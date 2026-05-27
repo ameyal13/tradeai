@@ -27,6 +27,7 @@ MIN_DIRECTION_SAMPLE = 30
 MIN_HOUR_SAMPLE = 10
 HIGH_EXPIRED_RATIO = 0.50
 HIGH_DRAWDOWN = 25.0
+PROBABILITY_BUCKETS = [0.0, 0.5, 0.6, 0.7, 0.8, 0.9, 1.01]
 
 
 def parse_bool(value: Any) -> bool:
@@ -113,6 +114,96 @@ def load_report(csv_path: str | Path | None = None, json_path: str | Path | None
             "generated_at": payload.get("generated_at"),
         }
     raise ValueError("Either csv_path or json_path is required")
+
+
+def probability_bucket(value: float) -> str:
+    for left, right in zip(PROBABILITY_BUCKETS, PROBABILITY_BUCKETS[1:]):
+        if left <= value < right:
+            right_label = "1.0" if right > 1 else f"{right:.1f}"
+            return f"{left:.1f}-{right_label}"
+    return "unknown"
+
+
+def trade_probability(row: dict[str, Any]) -> float:
+    signal = str(row.get("signal") or "").upper()
+    if signal == "BUY":
+        return parse_float(row.get("probability_buy_win"))
+    if signal == "SELL":
+        return parse_float(row.get("probability_sell_win"))
+    return max(parse_float(row.get("probability_buy_win")), parse_float(row.get("probability_sell_win")))
+
+
+def profit_factor_from_returns(returns: list[float]) -> float:
+    gains = sum(value for value in returns if value > 0)
+    losses = abs(sum(value for value in returns if value < 0))
+    if losses == 0:
+        return round(gains, 6) if gains else 0.0
+    return round(gains / losses, 6)
+
+
+def load_trades_report(trades_csv: str | Path | None = None) -> list[dict[str, Any]]:
+    if not trades_csv:
+        return []
+    with Path(trades_csv).open(newline="", encoding="utf-8") as handle:
+        return [dict(row) for row in csv.DictReader(handle)]
+
+
+def combo_key(row: dict[str, Any]) -> tuple[str, str, str, str, str, str]:
+    return (
+        str(row.get("symbol") or ""),
+        str(row.get("timeframe") or ""),
+        str(row.get("strategy_mode") or ""),
+        str(row.get("use_trade_labels") or ""),
+        str(row.get("trade_label_scheme") or ""),
+        str(row.get("label_type") or ""),
+    )
+
+
+def analyze_trade_calibration(trades: list[dict[str, Any]]) -> dict[str, Any]:
+    groups: dict[tuple[str, str, str, str, str, str], list[dict[str, Any]]] = {}
+    for row in trades:
+        signal = str(row.get("signal") or "").upper()
+        if signal not in {"BUY", "SELL"}:
+            continue
+        groups.setdefault(combo_key(row), []).append(row)
+
+    analyses: dict[str, Any] = {}
+    for key, rows in groups.items():
+        bucket_rows: dict[str, list[dict[str, Any]]] = {}
+        for row in rows:
+            bucket_rows.setdefault(probability_bucket(trade_probability(row)), []).append(row)
+
+        buckets: dict[str, dict[str, Any]] = {}
+        for bucket, items in sorted(bucket_rows.items()):
+            returns = [parse_float(item.get("return_pct")) for item in items if item.get("return_pct") not in {None, ""}]
+            wins = sum(1 for item in items if str(item.get("outcome") or "").upper() == "WIN")
+            avg_probability = sum(trade_probability(item) for item in items) / len(items) if items else 0
+            avg_return = sum(returns) / len(returns) if returns else 0
+            buckets[bucket] = {
+                "count": len(items),
+                "avg_probability": round(avg_probability, 6),
+                "realized_win_rate": round(wins / len(items) * 100, 6) if items else 0,
+                "average_return": round(avg_return, 6),
+                "profit_factor": profit_factor_from_returns(returns),
+                "expired_count": sum(1 for item in items if str(item.get("outcome") or "").upper() == "EXPIRED"),
+            }
+        high_probability_bad = [
+            bucket for bucket, metrics in buckets.items()
+            if metrics["count"] >= 5 and metrics["avg_probability"] >= 0.7 and metrics["average_return"] < 0
+        ]
+        analyses["|".join(key)] = {
+            "symbol": key[0],
+            "timeframe": key[1],
+            "strategy_mode": key[2],
+            "use_trade_labels": key[3],
+            "trade_label_scheme": key[4],
+            "label_type": key[5],
+            "trade_count": len(rows),
+            "buckets": buckets,
+            "high_probability_bad_buckets": high_probability_bad,
+            "calibration_warning": bool(high_probability_bad),
+        }
+    return analyses
 
 
 def classify_row(row: dict[str, Any]) -> str:
@@ -321,7 +412,11 @@ def analyze_row(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def analyze_report(rows: list[dict[str, Any]], metadata: dict[str, Any] | None = None) -> dict[str, Any]:
+def analyze_report(
+    rows: list[dict[str, Any]],
+    metadata: dict[str, Any] | None = None,
+    trades: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     analyses = [analyze_row(row) for row in rows]
     counts: dict[str, int] = {}
     for item in analyses:
@@ -331,6 +426,7 @@ def analyze_report(rows: list[dict[str, Any]], metadata: dict[str, Any] | None =
         "source": (metadata or {}).get("source"),
         "classification_counts": counts,
         "analyses": analyses,
+        "calibration": analyze_trade_calibration(trades or []),
         "global_recommendations": [
             "Do not move any rejected configuration to paper trading.",
             "Next useful experiment: compare current trade_outcome_directional labels against expiry-aware labels.",
@@ -373,6 +469,31 @@ def render_markdown(summary: dict[str, Any]) -> str:
     lines.extend(["## Global Recommendations", ""])
     lines.extend(f"- {item}" for item in summary["global_recommendations"])
     lines.append("")
+    calibration = summary.get("calibration") or {}
+    if calibration:
+        lines.extend(["## Probability Calibration", ""])
+        for item in calibration.values():
+            lines.extend([
+                f"### {item['symbol']} {item['timeframe']} {item['strategy_mode']} {item['trade_label_scheme']}",
+                "",
+                f"- Trades analyzed: {item['trade_count']}",
+                f"- Calibration warning: {item['calibration_warning']}",
+                "",
+                "| Probability bucket | Count | Avg predicted | Realized win rate | Avg return | Profit factor | Expired |",
+                "| --- | ---: | ---: | ---: | ---: | ---: | ---: |",
+            ])
+            for bucket, metrics in item["buckets"].items():
+                lines.append(
+                    f"| {bucket} | {metrics['count']} | {metrics['avg_probability']} | "
+                    f"{metrics['realized_win_rate']} | {metrics['average_return']} | "
+                    f"{metrics['profit_factor']} | {metrics['expired_count']} |"
+                )
+            if item["high_probability_bad_buckets"]:
+                lines.append("")
+                lines.append(
+                    "- Warning: high predicted probability buckets still have negative average returns; calibration/target alignment is suspect."
+                )
+            lines.append("")
     return "\n".join(lines)
 
 
@@ -397,6 +518,23 @@ def print_terminal_summary(summary: dict[str, Any]) -> None:
         for recommendation in item["recommendations"][:6]:
             print(f"  - {recommendation}")
         print()
+    calibration = summary.get("calibration") or {}
+    if calibration:
+        print("Probability calibration")
+        for item in calibration.values():
+            print(
+                f"{item['symbol']} {item['timeframe']} {item['strategy_mode']} "
+                f"{item['trade_label_scheme']}: trades={item['trade_count']} "
+                f"warning={item['calibration_warning']}"
+            )
+            for bucket, metrics in item["buckets"].items():
+                print(
+                    f"  {bucket}: n={metrics['count']} "
+                    f"pred={metrics['avg_probability']:.3f} "
+                    f"win={metrics['realized_win_rate']:.2f}% "
+                    f"avg_return={metrics['average_return']:.6f}"
+                )
+        print()
 
 
 def write_outputs(summary: dict[str, Any], output_dir: str | Path = "reports") -> dict[str, str]:
@@ -415,6 +553,7 @@ def build_parser() -> argparse.ArgumentParser:
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument("--csv", dest="csv_path")
     source.add_argument("--json", dest="json_path")
+    parser.add_argument("--trades-csv", dest="trades_csv")
     parser.add_argument("--output-dir", default="reports")
     return parser
 
@@ -422,7 +561,10 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> None:
     args = build_parser().parse_args()
     rows, metadata = load_report(csv_path=args.csv_path, json_path=args.json_path)
-    summary = analyze_report(rows, metadata)
+    trades = load_trades_report(args.trades_csv)
+    if args.trades_csv:
+        metadata["trades_source"] = args.trades_csv
+    summary = analyze_report(rows, metadata, trades=trades)
     paths = write_outputs(summary, args.output_dir)
     print_terminal_summary(summary)
     print(f"Markdown report: {paths['markdown']}")

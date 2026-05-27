@@ -3,10 +3,13 @@ import unittest
 from pathlib import Path
 
 from scripts.analyze_experiment_report import (
+    analyze_trade_calibration,
     analyze_report,
     classify_row,
     load_report,
+    load_trades_report,
     normalize_row,
+    probability_bucket,
     render_markdown,
     write_outputs,
 )
@@ -150,6 +153,63 @@ class AnalyzeExperimentReportTests(unittest.TestCase):
 
             self.assertTrue(Path(paths["markdown"]).exists())
             self.assertTrue(Path(paths["json"]).exists())
+
+    def test_probability_bucket_parsing(self):
+        self.assertEqual(probability_bucket(0.72), "0.7-0.8")
+
+    def test_trade_calibration_flags_high_probability_negative_return(self):
+        trades = [
+            {
+                "symbol": "BTC",
+                "timeframe": "15m",
+                "strategy_mode": "xgboost",
+                "use_trade_labels": "true",
+                "trade_label_scheme": "hybrid_touch_or_expiry",
+                "label_type": "hybrid_touch_or_expiry",
+                "signal": "BUY",
+                "probability_buy_win": "0.82",
+                "return_pct": "-0.3",
+                "outcome": "LOSS",
+            }
+            for _ in range(6)
+        ]
+
+        calibration = analyze_trade_calibration(trades)
+        item = next(iter(calibration.values()))
+
+        self.assertTrue(item["calibration_warning"])
+        self.assertIn("0.8-0.9", item["high_probability_bad_buckets"])
+
+    def test_render_markdown_includes_calibration_section(self):
+        trades = [
+            {
+                "symbol": "BTC",
+                "timeframe": "15m",
+                "strategy_mode": "xgboost",
+                "use_trade_labels": "true",
+                "trade_label_scheme": "hybrid_touch_or_expiry",
+                "label_type": "hybrid_touch_or_expiry",
+                "signal": "BUY",
+                "probability_buy_win": "0.82",
+                "return_pct": "-0.3",
+                "outcome": "LOSS",
+            }
+            for _ in range(6)
+        ]
+        summary = analyze_report([normalize_row(base_row())], {"source": "sample.csv"}, trades=trades)
+        markdown = render_markdown(summary)
+
+        self.assertIn("Probability Calibration", markdown)
+        self.assertIn("0.8-0.9", markdown)
+
+    def test_loads_trades_csv(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "trades.csv"
+            path.write_text("symbol,timeframe,signal,return_pct\nBTC,15m,BUY,1.0\n", encoding="utf-8")
+
+            rows = load_trades_report(path)
+
+        self.assertEqual(rows[0]["symbol"], "BTC")
 
 
 if __name__ == "__main__":
