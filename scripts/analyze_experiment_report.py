@@ -431,6 +431,8 @@ def analyze_row(row: dict[str, Any]) -> dict[str, Any]:
         recommendations.append("Current ATR trade labels may be too touch/expiry sensitive; test an expiry-aware target next.")
     if row.get("trade_label_scheme") == "hybrid_touch_or_expiry":
         recommendations.append("Hybrid expiry labels are experimental; compare against touch_only on the same window before trusting improvements.")
+    if row.get("trade_label_scheme") == "expected_value_classification":
+        recommendations.append("Expected-value labels are experimental; validate that higher score buckets improve realized PnL before tuning thresholds.")
     recommendations.append("Do not declare edge from this aggregate report alone; use --save-trades for probability calibration.")
 
     deduped_recommendations = list(dict.fromkeys(recommendations))

@@ -237,6 +237,56 @@ class MLEngineTests(unittest.TestCase):
         self.assertEqual(labels.iloc[0]["buy_win"], 1.0)
         self.assertEqual(labels.iloc[0]["sell_win"], 0.0)
 
+    def test_expected_value_classification_requires_net_return_after_costs(self):
+        idx = pd.date_range("2026-01-01", periods=3, freq="h", tz="UTC")
+        df = pd.DataFrame({
+            "timestamp": idx,
+            "open": [100, 100, 100],
+            "high": [100, 100.2, 100],
+            "low": [100, 99.8, 100],
+            "close": [100, 100.05, 100],
+            "volume": [1000, 1000, 1000],
+        })
+
+        labels = build_trade_outcome_labels(
+            df,
+            horizon_candles=1,
+            stop_loss_pct=0.05,
+            take_profit_pct=0.001,
+            commission_pct=0.001,
+            slippage_pct=0.0005,
+            spread_pct=0.0003,
+            label_scheme="expected_value_classification",
+            expected_value_threshold_pct=0.05,
+        )
+
+        self.assertEqual(labels.iloc[0]["buy_win"], 0.0)
+
+    def test_expected_value_classification_labels_positive_net_return(self):
+        idx = pd.date_range("2026-01-01", periods=3, freq="h", tz="UTC")
+        df = pd.DataFrame({
+            "timestamp": idx,
+            "open": [100, 100, 100],
+            "high": [100, 103, 100],
+            "low": [100, 99, 100],
+            "close": [100, 102, 100],
+            "volume": [1000, 1000, 1000],
+        })
+
+        labels = build_trade_outcome_labels(
+            df,
+            horizon_candles=1,
+            stop_loss_pct=0.05,
+            take_profit_pct=0.02,
+            commission_pct=0.001,
+            slippage_pct=0.0005,
+            spread_pct=0.0003,
+            label_scheme="expected_value_classification",
+            expected_value_threshold_pct=0.05,
+        )
+
+        self.assertEqual(labels.iloc[0]["buy_win"], 1.0)
+
     def test_trade_labels_values_are_only_binary_or_nan(self):
         labels = build_trade_outcome_labels(
             sample_candles(120),
@@ -390,6 +440,26 @@ class MLEngineTests(unittest.TestCase):
         self.assertEqual(result["label_type"], "hybrid_touch_or_expiry")
         self.assertEqual(result["trade_label_scheme"], "hybrid_touch_or_expiry")
         self.assertEqual(result["expiry_return_threshold_pct"], 0.05)
+
+    def test_xgboost_trade_labels_support_expected_value_scheme(self):
+        features = add_features(sample_candles(300))
+        result = xgboost_signal(
+            features,
+            min_train_rows=30,
+            strategy_params={
+                "use_trade_labels": True,
+                "trade_label_scheme": "expected_value_classification",
+                "horizon_candles": 4,
+                "commission_pct": 0,
+                "slippage_pct": 0,
+                "expected_value_threshold_pct": 0.05,
+            },
+        )
+
+        self.assertEqual(result["label_type"], "expected_value_classification")
+        self.assertEqual(result["trade_label_scheme"], "expected_value_classification")
+        self.assertEqual(result["expected_value_threshold_pct"], 0.05)
+        self.assertIn("expected_value_classification", result["label_level_note"])
 
     def test_xgboost_trade_label_hold_includes_hold_reason(self):
         features = add_features(sample_candles(300))

@@ -549,6 +549,31 @@ class HistoricalExperimentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(replay.call_args.kwargs["strategy_params"]["trade_label_scheme"], "hybrid_touch_or_expiry")
         self.assertEqual(report["config"]["trade_label_scheme"], "hybrid_touch_or_expiry")
 
+    async def test_expected_value_trade_label_scheme_is_allowed(self):
+        import scripts.run_historical_experiments as script
+
+        replay_result = {
+            "predictions": [],
+            "outcomes": [],
+            "metrics": [],
+            "assumptions": {},
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.object(script, "fetch_binance_klines", new=AsyncMock(return_value=synthetic_candles(600))):
+                with patch.object(script, "run_historical_replay", return_value=replay_result) as replay:
+                    report = await script.run_experiments(
+                        symbols=["BTC"],
+                        timeframes=["15m"],
+                        strategy_modes=["xgboost"],
+                        reports_dir=tmp,
+                        use_trade_labels=True,
+                        trade_label_scheme="expected_value_classification",
+                        use_cache=False,
+                    )
+
+        self.assertEqual(replay.call_args.kwargs["strategy_params"]["trade_label_scheme"], "expected_value_classification")
+        self.assertEqual(report["config"]["trade_label_scheme"], "expected_value_classification")
+
     async def test_trade_label_replay_uses_recent_windows_with_enough_history(self):
         import scripts.run_historical_experiments as script
 
