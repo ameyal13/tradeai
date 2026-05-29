@@ -11,10 +11,11 @@ from research.experiment_grid import build_experiment_grid, experiment_id, load_
 from research.experiment_runner import (
     _random_baseline,
     classify_result,
+    diagnostic_flags,
     purged_train_validation_test_split,
     run_experiment,
 )
-from research.experiment_store import ExperimentStore
+from research.experiment_store import ExperimentStore, render_markdown
 
 
 def sample_candles(rows=320):
@@ -130,6 +131,39 @@ class ExperimentRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(weak, "weak_candidate")
         self.assertEqual(candidate, "candidate_for_further_validation")
 
+    def test_research_watchlist_for_positive_validation_with_high_drawdown(self):
+        classification, reasons = classify_result(
+            {"profit_factor": 1.2, "avg_return_pct": 0.2, "max_drawdown_pct": 18},
+            {"profit_factor": 1.2, "avg_return_pct": 0.2, "max_drawdown_pct": 5},
+            {"validation": {"random_same_count": {"avg_return_pct": -0.1}, "deterministic": {"avg_return_pct": 0.1}}},
+        )
+
+        self.assertEqual(classification, "research_watchlist")
+        self.assertIn("validation_positive_but_high_drawdown", reasons)
+
+    def test_test_positive_does_not_convert_failed_validation_to_candidate(self):
+        classification, reasons = classify_result(
+            {"profit_factor": 0.8, "avg_return_pct": -0.1, "max_drawdown_pct": 2},
+            {"profit_factor": 1.8, "avg_return_pct": 0.5, "max_drawdown_pct": 2},
+            {"validation": {"random_same_count": {"avg_return_pct": -0.2}, "deterministic": {"avg_return_pct": -0.2}}},
+        )
+
+        self.assertEqual(classification, "hard_reject")
+        self.assertIn("test_positive_but_validation_failed_do_not_select", reasons)
+
+    def test_diagnostic_booleans_compare_validation_only(self):
+        flags = diagnostic_flags(
+            {"profit_factor": 1.2, "avg_return_pct": 0.2, "max_drawdown_pct": 16},
+            {"profit_factor": 1.5, "avg_return_pct": 0.3, "max_drawdown_pct": 2},
+            {"validation": {"random_same_count": {"avg_return_pct": 0.1}, "deterministic": {"avg_return_pct": 0.3}}},
+        )
+
+        self.assertTrue(flags["beats_random_validation"])
+        self.assertFalse(flags["beats_deterministic_validation"])
+        self.assertTrue(flags["validation_positive"])
+        self.assertTrue(flags["test_confirms"])
+        self.assertTrue(flags["high_drawdown_flag"])
+
     def test_random_baseline_uses_same_number_of_trades(self):
         returns = pd.DataFrame({
             "buy_return_pct": np.linspace(-1, 1, 20),
@@ -156,11 +190,44 @@ class ExperimentRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("test_metrics", result)
         self.assertTrue(result["guardrails"]["test_not_used_for_selection"])
         self.assertIn(result["classification"], {
+            "hard_reject",
             "reject",
+            "research_watchlist",
             "weak_candidate",
             "candidate_for_further_validation",
             "validation_candidate_test_failed",
         })
+        self.assertIn("diagnostics", result)
+        self.assertIn("beats_random_validation", result["diagnostics"])
+
+    def test_markdown_sections_and_random_avg_render_correctly(self):
+        row = {
+            "experiment_id": "abc",
+            "classification": "research_watchlist",
+            "config": {"symbol": "SOL", "timeframe": "1h", "horizon_candles": 24, "risk_reward": 2.0, "atr_stop_multiplier": 1.5, "cost_mode": "low_costs"},
+            "validation_metrics": {"n_trades": 4, "avg_return_pct": 0.2, "profit_factor": 1.2, "max_drawdown_pct": 20, "buy_trades": 4, "sell_trades": 0},
+            "test_metrics": {"n_trades": 3, "avg_return_pct": 0.3, "profit_factor": 1.4, "max_drawdown_pct": 2, "buy_trades": 3, "sell_trades": 0},
+            "baselines": {"validation": {"random_same_count": {"avg_return_pct": -0.1, "profit_factor": 0.8}, "deterministic": {"avg_return_pct": 0.1, "profit_factor": 1.0}}},
+            "diagnostics": {
+                "beats_random_validation": True,
+                "beats_deterministic_validation": True,
+                "validation_positive": True,
+                "test_confirms": True,
+                "high_drawdown_flag": True,
+                "validation_directional_exposure": {"buy_trades": 4, "sell_trades": 0, "directional_bias": "buy_heavy"},
+                "test_directional_exposure": {"buy_trades": 3, "sell_trades": 0, "directional_bias": "buy_heavy"},
+            },
+            "reasons": ["validation_positive_but_high_drawdown"],
+        }
+
+        markdown = render_markdown([row], "results.jsonl")
+
+        self.assertIn("## Candidates", markdown)
+        self.assertIn("## Research Watchlist", markdown)
+        self.assertIn("## Hard Rejects", markdown)
+        self.assertIn("## Test-Only Positives, Not Selectable", markdown)
+        self.assertIn("random validation avg/PF: `-0.1` / `0.8`", markdown)
+        self.assertIn("bias `buy_heavy`", markdown)
 
 
 class AutopilotTests(unittest.IsolatedAsyncioTestCase):

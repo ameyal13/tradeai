@@ -208,12 +208,50 @@ def _baselines(
     }
 
 
-def classify_result(validation_metrics: dict[str, Any], test_metrics: dict[str, Any], baselines: dict[str, Any]) -> tuple[str, list[str]]:
-    reasons: list[str] = []
+def diagnostic_flags(validation_metrics: dict[str, Any], test_metrics: dict[str, Any], baselines: dict[str, Any]) -> dict[str, bool]:
     random_avg = baselines["validation"]["random_same_count"]["avg_return_pct"]
     deterministic_avg = baselines["validation"]["deterministic"]["avg_return_pct"]
-    validation_passes_random = validation_metrics["avg_return_pct"] > random_avg
-    validation_passes_deterministic = validation_metrics["avg_return_pct"] > deterministic_avg
+    return {
+        "beats_random_validation": validation_metrics["avg_return_pct"] > random_avg,
+        "beats_deterministic_validation": validation_metrics["avg_return_pct"] > deterministic_avg,
+        "validation_positive": validation_metrics["avg_return_pct"] > 0 and validation_metrics["profit_factor"] > 1.0,
+        "test_confirms": (
+            test_metrics["profit_factor"] >= 1.0
+            and test_metrics["avg_return_pct"] > 0
+            and test_metrics["max_drawdown_pct"] < 20
+        ),
+        "high_drawdown_flag": validation_metrics["max_drawdown_pct"] >= 15,
+    }
+
+
+def directional_exposure(metrics: dict[str, Any]) -> dict[str, Any]:
+    buy_trades = int(metrics.get("buy_trades") or 0)
+    sell_trades = int(metrics.get("sell_trades") or 0)
+    total = buy_trades + sell_trades
+    buy_ratio = round(buy_trades / total, 6) if total else 0
+    sell_ratio = round(sell_trades / total, 6) if total else 0
+    if total == 0:
+        bias = "no_trades"
+    elif buy_ratio >= 0.85:
+        bias = "buy_heavy"
+    elif sell_ratio >= 0.85:
+        bias = "sell_heavy"
+    else:
+        bias = "balanced"
+    return {
+        "buy_trades": buy_trades,
+        "sell_trades": sell_trades,
+        "buy_ratio": buy_ratio,
+        "sell_ratio": sell_ratio,
+        "directional_bias": bias,
+    }
+
+
+def classify_result(validation_metrics: dict[str, Any], test_metrics: dict[str, Any], baselines: dict[str, Any]) -> tuple[str, list[str]]:
+    reasons: list[str] = []
+    flags = diagnostic_flags(validation_metrics, test_metrics, baselines)
+    validation_passes_random = flags["beats_random_validation"]
+    validation_passes_deterministic = flags["beats_deterministic_validation"]
 
     if validation_metrics["profit_factor"] < 1.0:
         reasons.append("validation_profit_factor_below_1")
@@ -222,7 +260,14 @@ def classify_result(validation_metrics: dict[str, Any], test_metrics: dict[str, 
     if not validation_passes_random:
         reasons.append("validation_does_not_beat_random_same_count")
     if reasons:
+        if test_metrics["avg_return_pct"] > 0 and test_metrics["profit_factor"] > 1.0:
+            reasons.append("test_positive_but_validation_failed_do_not_select")
+        if validation_metrics["avg_return_pct"] <= 0 and validation_metrics["profit_factor"] < 1.0:
+            return "hard_reject", reasons
         return "reject", reasons
+
+    if flags["validation_positive"] and flags["high_drawdown_flag"]:
+        return "research_watchlist", ["validation_positive_but_high_drawdown"]
 
     validation_candidate = (
         validation_metrics["profit_factor"] > 1.1
@@ -238,16 +283,13 @@ def classify_result(validation_metrics: dict[str, Any], test_metrics: dict[str, 
         and not validation_passes_deterministic
     )
     if validation_candidate:
-        test_confirms = (
-            test_metrics["profit_factor"] >= 1.0
-            and test_metrics["avg_return_pct"] > 0
-            and test_metrics["max_drawdown_pct"] < 20
-        )
-        if not test_confirms:
+        if not flags["test_confirms"]:
             return "validation_candidate_test_failed", ["test_holdout_failed_confirmation"]
         return "candidate_for_further_validation", ["validation_and_test_confirmed"]
     if weak_candidate:
         return "weak_candidate", ["validation_weak_candidate"]
+    if flags["validation_positive"]:
+        return "research_watchlist", ["validation_positive_but_does_not_match_candidate_rules"]
     return "reject", ["validation_positive_but_does_not_match_candidate_rules"]
 
 
@@ -354,6 +396,7 @@ async def run_experiment(config: dict[str, Any]) -> dict[str, Any]:
             ),
         }
         classification, reasons = classify_result(validation_metrics, test_metrics, baselines)
+        flags = diagnostic_flags(validation_metrics, test_metrics, baselines)
 
     return {
         "experiment_id": config["experiment_id"],
@@ -379,6 +422,17 @@ async def run_experiment(config: dict[str, Any]) -> dict[str, Any]:
         "baselines": baselines,
         "classification": classification,
         "reasons": reasons,
+        "diagnostics": {
+            **(flags if "flags" in locals() else {
+                "beats_random_validation": False,
+                "beats_deterministic_validation": False,
+                "validation_positive": False,
+                "test_confirms": False,
+                "high_drawdown_flag": False,
+            }),
+            "validation_directional_exposure": directional_exposure(validation_metrics),
+            "test_directional_exposure": directional_exposure(test_metrics),
+        },
         "guardrails": {
             "no_trading": True,
             "no_prediction_journal_writes": True,
