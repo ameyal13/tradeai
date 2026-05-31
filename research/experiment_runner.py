@@ -293,20 +293,22 @@ def classify_result(validation_metrics: dict[str, Any], test_metrics: dict[str, 
     return "reject", ["validation_positive_but_does_not_match_candidate_rules"]
 
 
-async def run_experiment(config: dict[str, Any]) -> dict[str, Any]:
-    """Run one controlled experiment. No operational signal is generated."""
+def run_experiment_on_candles(
+    config: dict[str, Any],
+    candles: pd.DataFrame,
+    data_metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Run one controlled experiment on a preselected candle window.
+
+    This keeps train/validation/test ownership with callers that need exact
+    temporal windows, while preserving the same modeling path used by
+    ``run_experiment``.
+    """
     cost_mode = config["cost_mode"]
     if cost_mode not in DEFAULT_COST_PROFILES:
         raise ValueError(f"Unknown cost_mode: {cost_mode}")
     costs = DEFAULT_COST_PROFILES[cost_mode]
-    loaded = await load_experiment_candles(
-        config["symbol"],
-        config["timeframe"],
-        max_candles=int(config.get("max_candles", 1500)),
-        use_cache=True,
-        refresh_cache=False,
-    )
-    candles = loaded["candles"]
+    data_metadata = data_metadata or {}
     features = add_research_features(candles)
     feature_cols = list(FEATURE_COLS)
     stop_pcts, take_pcts = _atr_label_pcts(
@@ -402,9 +404,9 @@ async def run_experiment(config: dict[str, Any]) -> dict[str, Any]:
         "experiment_id": config["experiment_id"],
         "created_at": datetime.now(timezone.utc).isoformat(),
         "config": config,
-        "data_source": loaded.get("data_source"),
-        "data_cache_path": loaded.get("data_cache_path"),
-        "data_warning": loaded.get("data_warning"),
+        "data_source": data_metadata.get("data_source"),
+        "data_cache_path": data_metadata.get("data_cache_path"),
+        "data_warning": data_metadata.get("data_warning"),
         "split": {
             "method": "temporal_train_validation_test_with_purge",
             "purge_candles": int(config["horizon_candles"]),
@@ -440,3 +442,15 @@ async def run_experiment(config: dict[str, Any]) -> dict[str, Any]:
             "test_not_used_for_selection": True,
         },
     }
+
+
+async def run_experiment(config: dict[str, Any]) -> dict[str, Any]:
+    """Run one controlled experiment. No operational signal is generated."""
+    loaded = await load_experiment_candles(
+        config["symbol"],
+        config["timeframe"],
+        max_candles=int(config.get("max_candles", 1500)),
+        use_cache=True,
+        refresh_cache=False,
+    )
+    return run_experiment_on_candles(config, loaded["candles"], loaded)
