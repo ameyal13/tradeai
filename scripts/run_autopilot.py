@@ -23,18 +23,29 @@ def build_parser() -> argparse.ArgumentParser:
     group = parser.add_mutually_exclusive_group()
     group.add_argument("--resume", action="store_true", dest="resume", default=True)
     group.add_argument("--no-resume", action="store_false", dest="resume")
+    notify_group = parser.add_mutually_exclusive_group()
+    notify_group.add_argument("--notify-telegram", action="store_true", dest="notify_telegram")
+    notify_group.add_argument("--no-notify-telegram", action="store_false", dest="notify_telegram")
+    parser.set_defaults(notify_telegram=False)
     parser.add_argument("--max-experiments", type=int, default=None)
     return parser
 
 
 async def main() -> None:
     args = build_parser().parse_args()
-    result = await run_autopilot(resume=args.resume, max_experiments=args.max_experiments)
+    result = await run_autopilot(
+        resume=args.resume,
+        max_experiments=args.max_experiments,
+        notify_telegram=args.notify_telegram,
+    )
     print("Research Autopilot finished")
     print(f"interrupted: {result['interrupted']}")
     print(f"ran: {result['ran']}")
     print(f"completed: {result['completed']} / {result['total']}")
     print(f"candidates: {result.get('candidates', 0)}")
+    print(f"watchlist: {result.get('watchlist', 0)}")
+    if args.notify_telegram:
+        print(f"telegram_sent: {result.get('telegram_sent', False)}")
     print(f"jsonl: {result['jsonl_path']}")
     print(f"markdown: {result['markdown_path']}")
     print(f"checkpoint: {result['checkpoint_path']}")
