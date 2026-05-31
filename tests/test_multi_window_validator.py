@@ -1,7 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import numpy as np
 import pandas as pd
@@ -12,6 +12,7 @@ from research.multi_window_validator import (
     classify_multi_window_setup,
     generate_rolling_windows,
     render_multi_window_markdown,
+    run_multi_window_validation,
     run_setup_across_windows,
     save_multi_window_report,
 )
@@ -192,6 +193,13 @@ class MultiWindowValidatorTests(unittest.TestCase):
         aggregate = aggregate_multi_window_results([window_row(), window_row(), window_row()])
         summary = {
             "created_at": "2026-01-01T00:00:00+00:00",
+            "data": {
+                "requested_max_candles": 1500,
+                "actual_rows_loaded": 1000,
+                "data_source": "cache",
+                "data_cache_path": "cache.csv",
+                "data_warning": "cache_incomplete",
+            },
             "classification_counts": {"stable_research_candidate": 1},
             "setups": [{
                 "setup": setup,
@@ -206,6 +214,9 @@ class MultiWindowValidatorTests(unittest.TestCase):
         self.assertIn("Multi-Window Validation Summary", markdown)
         self.assertIn("stable_research_candidate", markdown)
         self.assertIn("Validation selects; test only confirms", markdown)
+        self.assertIn("requested max candles: `1500`", markdown)
+        self.assertIn("actual rows loaded: `1000`", markdown)
+        self.assertIn("cache_incomplete", markdown)
 
     def test_save_multi_window_report_writes_json_and_markdown(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -223,6 +234,43 @@ class MultiWindowValidatorTests(unittest.TestCase):
         self.assertEqual(args.window_size_candles, 600)
         self.assertEqual(args.step_size_candles, 250)
         self.assertEqual(args.max_candles, 1500)
+        self.assertFalse(args.refresh_cache)
+
+    def test_cli_parser_accepts_refresh_cache(self):
+        args = build_parser().parse_args(["--refresh-cache"])
+
+        self.assertTrue(args.refresh_cache)
+
+    def test_run_multi_window_report_includes_requested_and_actual_rows(self):
+        import asyncio
+        import research.multi_window_validator as validator
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.object(validator, "load_experiment_candles", new=AsyncMock(return_value={
+                "candles": sample_candles(1000),
+                "data_source": "cache",
+                "data_cache_path": "cache.csv",
+                "data_warning": "cache_incomplete",
+            })) as loader:
+                with patch.object(validator, "run_setup_across_windows", return_value={
+                    "setup": build_watchlist_setups()[0],
+                    "aggregate": {"total_windows": 0, "valid_windows": 0, "insufficient_windows": 0},
+                    "classification": "needs_more_data",
+                    "windows": [],
+                }):
+                    summary = asyncio.run(run_multi_window_validation(
+                        symbol="SOL",
+                        timeframe="1h",
+                        max_candles=1500,
+                        output_dir=tmp,
+                        refresh_cache=True,
+                    ))
+
+        self.assertEqual(summary["data"]["requested_max_candles"], 1500)
+        self.assertEqual(summary["data"]["actual_rows_loaded"], 1000)
+        self.assertEqual(summary["data"]["data_warning"], "cache_incomplete")
+        self.assertTrue(summary["data"]["refresh_cache"])
+        self.assertTrue(loader.call_args.kwargs["refresh_cache"])
 
 
 if __name__ == "__main__":

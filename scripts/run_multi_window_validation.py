@@ -25,6 +25,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--window-size-candles", type=int, default=600)
     parser.add_argument("--step-size-candles", type=int, default=250)
     parser.add_argument("--max-candles", type=int, default=1500)
+    parser.add_argument("--refresh-cache", action="store_true", default=False)
     parser.add_argument("--output-dir", default=str(DEFAULT_OUTPUT_DIR))
     return parser
 
@@ -37,12 +38,18 @@ async def main() -> None:
         max_candles=args.max_candles,
         window_size_candles=args.window_size_candles,
         step_size_candles=args.step_size_candles,
+        refresh_cache=args.refresh_cache,
         output_dir=args.output_dir,
     )
     print("Multi-window validation finished")
     print(f"symbol: {summary['data']['symbol']}")
     print(f"timeframe: {summary['data']['timeframe']}")
-    print(f"rows: {summary['data']['rows']}")
+    print(f"requested_max_candles: {summary['data']['requested_max_candles']}")
+    print(f"actual_rows_loaded: {summary['data']['actual_rows_loaded']}")
+    print(f"data_source: {summary['data']['data_source']}")
+    print(f"data_cache_path: {summary['data']['data_cache_path']}")
+    if summary["data"].get("data_warning"):
+        print(f"data_warning: {summary['data']['data_warning']}")
     print(f"classification_counts: {summary['classification_counts']}")
     for setup_result in summary["setups"]:
         setup = setup_result["setup"]

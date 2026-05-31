@@ -68,14 +68,18 @@ async def load_experiment_candles(
 ) -> dict[str, Any]:
     cache_path = cache_path_for_ohlcv(symbol, timeframe, max_candles, cache_dir=cache_dir)
     cache_warning = ""
+    def incomplete_warning(row_count: int) -> str:
+        return f"cache_incomplete: requested {max_candles} candles, loaded {row_count}"
+
     if use_cache and not refresh_cache:
         try:
             candles = load_ohlcv_cache(cache_path, limit=max_candles)
+            warning = incomplete_warning(len(candles)) if len(candles) < max_candles else ""
             return {
                 "candles": candles,
                 "data_source": "cache",
                 "data_cache_path": str(cache_path),
-                "data_warning": "",
+                "data_warning": warning,
             }
         except FileNotFoundError:
             pass
@@ -84,19 +88,23 @@ async def load_experiment_candles(
 
     try:
         candles = await fetch_binance_klines(symbol, timeframe, limit=max_candles)
+        network_warning = f"historical_data_partial: requested {max_candles} candles, fetched {len(candles)}" if len(candles) < max_candles else ""
+        warning = "; ".join(part for part in [cache_warning, network_warning] if part)
         if use_cache:
             save_ohlcv_cache(candles, cache_path)
         return {
             "candles": candles,
             "data_source": "network",
             "data_cache_path": str(cache_path) if use_cache else "",
-            "data_warning": cache_warning,
+            "data_warning": warning,
         }
     except Exception as exc:
         if use_cache:
             try:
                 candles = load_ohlcv_cache(cache_path, limit=max_candles)
                 warning_parts = [f"historical_data_cache_fallback: {format_historical_data_error(exc)}"]
+                if len(candles) < max_candles:
+                    warning_parts.append(incomplete_warning(len(candles)))
                 if cache_warning:
                     warning_parts.append(cache_warning)
                 return {

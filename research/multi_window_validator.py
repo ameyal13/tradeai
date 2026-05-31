@@ -334,6 +334,14 @@ def render_multi_window_markdown(summary: dict[str, Any]) -> str:
         "",
         f"`{summary.get('classification_counts', {})}`",
         "",
+        "## Data",
+        "",
+        f"- requested max candles: `{(summary.get('data') or {}).get('requested_max_candles')}`",
+        f"- actual rows loaded: `{(summary.get('data') or {}).get('actual_rows_loaded')}`",
+        f"- data source: `{(summary.get('data') or {}).get('data_source')}`",
+        f"- cache path: `{(summary.get('data') or {}).get('data_cache_path')}`",
+        f"- data warning: `{(summary.get('data') or {}).get('data_warning')}`",
+        "",
         "## Setup Results",
         "",
     ]
@@ -416,6 +424,7 @@ async def run_multi_window_validation(
     max_candles: int = 1500,
     window_size_candles: int = 600,
     step_size_candles: int = 250,
+    refresh_cache: bool = False,
     output_dir: str | Path = DEFAULT_OUTPUT_DIR,
 ) -> dict[str, Any]:
     """Run the approved SOL watchlist setups across rolling windows."""
@@ -424,7 +433,7 @@ async def run_multi_window_validation(
         timeframe,
         max_candles=int(max_candles),
         use_cache=True,
-        refresh_cache=False,
+        refresh_cache=bool(refresh_cache),
     )
     candles = loaded["candles"]
     setups = build_watchlist_setups(
@@ -459,11 +468,14 @@ async def run_multi_window_validation(
         "data": {
             "symbol": symbol.upper(),
             "timeframe": timeframe,
+            "requested_max_candles": int(max_candles),
             "max_candles": int(max_candles),
+            "actual_rows_loaded": int(len(candles)),
             "rows": int(len(candles)),
             "data_source": loaded.get("data_source"),
             "data_cache_path": loaded.get("data_cache_path"),
             "data_warning": loaded.get("data_warning"),
+            "refresh_cache": bool(refresh_cache),
         },
         "classification_counts": counts,
         "setups": setup_results,

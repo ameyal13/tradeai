@@ -168,20 +168,26 @@ async def fetch_binance_klines(
     end_ms = to_millis(end_time)
     attempts = max(1, retries + 1)
     last_error: Exception | None = None
+    use_backward_latest_pagination = limit > 1000 and start_ms is None
 
     for attempt in range(attempts):
         remaining = limit
         all_rows: list[list[Any]] = []
         next_start = start_ms
+        next_end = end_ms
         try:
             async with httpx.AsyncClient(timeout=30) as client:
                 while remaining > 0:
                     page_limit = min(1000, remaining)
                     params: dict[str, Any] = {"symbol": ticker, "interval": interval, "limit": page_limit}
-                    if next_start is not None:
-                        params["startTime"] = next_start
-                    if end_ms is not None:
-                        params["endTime"] = end_ms
+                    if use_backward_latest_pagination:
+                        if next_end is not None:
+                            params["endTime"] = next_end
+                    else:
+                        if next_start is not None:
+                            params["startTime"] = next_start
+                        if end_ms is not None:
+                            params["endTime"] = end_ms
                     response = await client.get(f"{BINANCE_BASE}/klines", params=params)
                     response.raise_for_status()
                     rows = response.json()
@@ -189,11 +195,18 @@ async def fetch_binance_klines(
                         break
                     all_rows.extend(rows)
                     remaining -= len(rows)
-                    last_open = int(rows[-1][0])
-                    next_start = last_open + 1
-                    if len(rows) < page_limit or (end_ms is not None and last_open >= end_ms):
-                        break
-            df = normalize_klines(all_rows).head(limit)
+                    if use_backward_latest_pagination:
+                        earliest_open = int(rows[0][0])
+                        next_end = earliest_open - 1
+                        if next_end <= 0 or len(rows) < page_limit:
+                            break
+                    else:
+                        last_open = int(rows[-1][0])
+                        next_start = last_open + 1
+                        if len(rows) < page_limit or (end_ms is not None and last_open >= end_ms):
+                            break
+            df = normalize_klines(all_rows)
+            df = df.tail(limit).reset_index(drop=True) if use_backward_latest_pagination else df.head(limit).reset_index(drop=True)
             if df.empty:
                 raise HistoricalDataError("empty_data", f"Binance returned no OHLCV rows for {ticker} {interval}")
             return df

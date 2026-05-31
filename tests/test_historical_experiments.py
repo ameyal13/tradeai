@@ -250,6 +250,28 @@ class HistoricalExperimentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(report["summary"][0]["data_source"], "cache")
         self.assertIn("BTCUSDT_15m_180", report["summary"][0]["data_cache_path"])
 
+    async def test_incomplete_cache_reports_warning(self):
+        import scripts.run_historical_experiments as script
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_dir = Path(tmp) / "cache"
+            cache_path = script.cache_path_for_ohlcv("BTC", "15m", 180, cache_dir=cache_dir)
+            script.save_ohlcv_cache(synthetic_candles(100), cache_path)
+            with patch.object(script, "fetch_binance_klines", new=AsyncMock(side_effect=AssertionError("network should not be used"))):
+                loaded = await script.load_experiment_candles(
+                    "BTC",
+                    "15m",
+                    max_candles=180,
+                    use_cache=True,
+                    refresh_cache=False,
+                    cache_dir=cache_dir,
+                )
+
+        self.assertEqual(loaded["data_source"], "cache")
+        self.assertEqual(len(loaded["candles"]), 100)
+        self.assertIn("cache_incomplete", loaded["data_warning"])
+        self.assertIn("requested 180", loaded["data_warning"])
+
     async def test_falls_back_to_cache_when_network_fails(self):
         import scripts.run_historical_experiments as script
 
