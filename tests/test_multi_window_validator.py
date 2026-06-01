@@ -169,13 +169,39 @@ class MultiWindowValidatorTests(unittest.TestCase):
     def test_unstable_watchlist_classifies_correctly(self):
         rows = [
             window_row(),
+            window_row(validation_positive=True, beats_random=True, beats_deterministic=False, validation_pf=1.02, validation_avg=0.02),
             window_row(validation_positive=False, beats_random=False, beats_deterministic=False, validation_pf=0.9, validation_avg=-0.1),
-            window_row(validation_positive=False, beats_random=False, beats_deterministic=False, validation_pf=0.8, validation_avg=-0.2),
         ]
 
         aggregate = aggregate_multi_window_results(rows)
 
         self.assertEqual(classify_multi_window_setup(aggregate), "unstable_watchlist")
+
+    def test_pf_below_one_and_negative_avg_is_multi_window_reject(self):
+        rows = [
+            window_row(validation_positive=True, beats_random=True, beats_deterministic=True, validation_pf=0.8, validation_avg=-0.1),
+            window_row(validation_positive=True, beats_random=True, beats_deterministic=True, validation_pf=0.746912, validation_avg=-0.147788),
+            window_row(validation_positive=True, beats_random=True, beats_deterministic=True, validation_pf=0.7, validation_avg=-0.2),
+        ]
+
+        aggregate = aggregate_multi_window_results(rows)
+
+        self.assertEqual(aggregate["median_validation_pf"], 0.746912)
+        self.assertEqual(aggregate["median_validation_avg_return"], -0.147788)
+        self.assertEqual(classify_multi_window_setup(aggregate), "multi_window_reject")
+
+    def test_deeply_negative_pf_and_avg_is_multi_window_reject(self):
+        rows = [
+            window_row(validation_positive=True, beats_random=True, beats_deterministic=True, validation_pf=0.5, validation_avg=-0.2),
+            window_row(validation_positive=True, beats_random=True, beats_deterministic=True, validation_pf=0.447046, validation_avg=-0.395615),
+            window_row(validation_positive=True, beats_random=True, beats_deterministic=True, validation_pf=0.3, validation_avg=-0.5),
+        ]
+
+        aggregate = aggregate_multi_window_results(rows)
+
+        self.assertEqual(aggregate["median_validation_pf"], 0.447046)
+        self.assertEqual(aggregate["median_validation_avg_return"], -0.395615)
+        self.assertEqual(classify_multi_window_setup(aggregate), "multi_window_reject")
 
     def test_multi_window_reject_classifies_correctly(self):
         rows = [
