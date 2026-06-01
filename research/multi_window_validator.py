@@ -303,7 +303,18 @@ def classify_multi_window_setup(aggregate: dict[str, Any]) -> str:
     ):
         return "stable_research_candidate"
 
-    if validation_rate >= 0.30 or beats_random_rate >= 0.30 or median_avg > 0 or median_pf > 1.0:
+    if median_pf < 1.0 and median_avg <= 0:
+        return "multi_window_reject"
+    if validation_rate < 0.40 or beats_random_rate < 0.40:
+        return "multi_window_reject"
+
+    has_partial_signal = median_pf >= 1.0 or median_avg > 0
+    has_partial_confirmation = (
+        validation_rate >= 0.40
+        or beats_random_rate >= 0.40
+        or beats_deterministic_rate >= 0.40
+    )
+    if has_partial_signal and has_partial_confirmation:
         return "unstable_watchlist"
     return "multi_window_reject"
 
@@ -428,6 +439,34 @@ async def run_multi_window_validation(
     output_dir: str | Path = DEFAULT_OUTPUT_DIR,
 ) -> dict[str, Any]:
     """Run the approved SOL watchlist setups across rolling windows."""
+    setups = build_watchlist_setups(
+        symbol=symbol,
+        timeframe=timeframe,
+        max_candles=int(max_candles),
+    )
+    return await run_multi_window_validation_for_setups(
+        setups=setups,
+        symbol=symbol,
+        timeframe=timeframe,
+        max_candles=max_candles,
+        window_size_candles=window_size_candles,
+        step_size_candles=step_size_candles,
+        refresh_cache=refresh_cache,
+        output_dir=output_dir,
+    )
+
+
+async def run_multi_window_validation_for_setups(
+    setups: list[dict[str, Any]],
+    symbol: str = "SOL",
+    timeframe: str = "1h",
+    max_candles: int = 1500,
+    window_size_candles: int = 600,
+    step_size_candles: int = 250,
+    refresh_cache: bool = False,
+    output_dir: str | Path = DEFAULT_OUTPUT_DIR,
+) -> dict[str, Any]:
+    """Run arbitrary fixed setups across rolling windows and save a report."""
     loaded = await load_experiment_candles(
         symbol.upper(),
         timeframe,
@@ -436,11 +475,6 @@ async def run_multi_window_validation(
         refresh_cache=bool(refresh_cache),
     )
     candles = loaded["candles"]
-    setups = build_watchlist_setups(
-        symbol=symbol,
-        timeframe=timeframe,
-        max_candles=int(max_candles),
-    )
     setup_results = [
         run_setup_across_windows(
             setup,
@@ -461,7 +495,7 @@ async def run_multi_window_validation(
             "window_size_candles": int(window_size_candles),
             "step_size_candles": int(step_size_candles),
             "test_not_used_for_selection": True,
-            "purge_candles": 16,
+            "purge_candles": sorted({int(setup.get("horizon_candles", 0)) for setup in setups}),
             "accuracy_not_used": True,
             "no_trading": True,
         },
