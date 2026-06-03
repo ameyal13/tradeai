@@ -322,6 +322,7 @@ async def run_research_cycle(
     resume: bool = True,
     retry_failed: bool = False,
     notify_telegram: bool = False,
+    grid: list[dict[str, Any]] | None = None,
     registry_path: str | Path = DEFAULT_REGISTRY_PATH,
     cycles_dir: str | Path = DEFAULT_CYCLES_DIR,
     results_dir: str | Path = DEFAULT_RESULTS_DIR,
@@ -330,8 +331,8 @@ async def run_research_cycle(
 ) -> dict[str, Any]:
     """Run one controlled daemon cycle."""
     registry = ResearchRegistry(registry_path)
-    grid = build_daemon_grid()
-    runnable = registry.filter_runnable(grid, retry_failed=retry_failed) if resume else grid
+    active_grid = grid if grid is not None else build_daemon_grid()
+    runnable = registry.filter_runnable(active_grid, retry_failed=retry_failed) if resume else active_grid
     selected = runnable[: max(0, int(max_configs_per_cycle))]
     results: list[dict[str, Any]] = []
     interrupted = False
@@ -453,7 +454,7 @@ async def run_research_cycle(
         "finished_at": utc_now(),
         "interrupted": interrupted,
         "requested_max_configs": int(max_configs_per_cycle),
-        "grid_size": len(grid),
+        "grid_size": len(active_grid),
         "runnable_before_cycle": len(runnable),
         "selected_configs": len(selected),
         "results": results,
