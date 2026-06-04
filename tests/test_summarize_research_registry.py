@@ -10,6 +10,7 @@ from scripts.summarize_research_registry import (
     render_markdown,
     summarize_registry,
 )
+from scripts.summarize_refined_research import build_parser as build_refined_parser
 
 
 def config(config_id="cfg1", horizon=16, rr=2.0, atr=1.25, cost="low_costs"):
@@ -125,6 +126,43 @@ class ResearchRegistrySummaryTests(unittest.TestCase):
         self.assertIn("Research Daemon Global Summary", markdown)
         self.assertIn("unstable_watchlist", markdown)
 
+    def test_refined_summary_generates_refined_filenames_and_top_15(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            registry = Path(tmp) / "refined_registry.jsonl"
+            rows = []
+            for idx in range(16):
+                result_path = Path(tmp) / f"result_{idx}.json"
+                result_path.write_text(json.dumps(result_json(
+                    classification="unstable_watchlist",
+                    pf=1.0 + idx / 100,
+                    avg=0.01 + idx / 1000,
+                )), encoding="utf-8")
+                rows.append(registry_row(
+                    f"cfg{idx}",
+                    classification="unstable_watchlist",
+                    json_path=str(result_path),
+                    horizon=12 if idx < 10 else 20,
+                    rr=2.5,
+                    atr=1.25,
+                    cost="low_costs",
+                ))
+            self.write_registry(registry, rows)
+
+            summary = summarize_registry(
+                registry,
+                output_dir=tmp,
+                filename_prefix="refined_global_summary",
+                top_limit=15,
+                refined=True,
+            )
+            markdown = Path(summary["markdown_path"]).read_text(encoding="utf-8")
+
+        self.assertIn("refined_global_summary_", Path(summary["json_path"]).name)
+        self.assertEqual(len(summary["top"]["median_validation_pf"]), 15)
+        self.assertIn("Refined Research Global Summary", markdown)
+        self.assertIn("Top 15 By Median Validation PF", markdown)
+        self.assertIn("Top Watchlist Diagnostics: Why Not Stable", markdown)
+
     def test_no_test_selection_guardrail_in_report(self):
         summary = build_global_summary(enrich_registry_records([
             registry_row("cfg1", classification="multi_window_reject"),
@@ -135,6 +173,37 @@ class ResearchRegistrySummaryTests(unittest.TestCase):
         self.assertTrue(summary["guardrails"]["test_not_used_for_selection"])
         self.assertIn("test metrics are diagnostic only", markdown)
         self.assertIn("Diagnostic Only, Not Selectable", markdown)
+
+    def test_refined_report_includes_stable_failure_reasons(self):
+        result = result_json(
+            classification="unstable_watchlist",
+            pf=1.2,
+            avg=0.2,
+            test_pf=1.0,
+            test_confirm=0.2,
+        )
+        result["setups"][0]["aggregate"]["validation_positive_rate"] = 0.4
+        result["setups"][0]["aggregate"]["beats_random_rate"] = 0.5
+        result["setups"][0]["aggregate"]["beats_deterministic_rate"] = 0.4
+        with tempfile.TemporaryDirectory() as tmp:
+            result_path = Path(tmp) / "result.json"
+            result_path.write_text(json.dumps(result), encoding="utf-8")
+            records = enrich_registry_records([
+                registry_row("cfg1", classification="unstable_watchlist", json_path=str(result_path)),
+            ])
+            summary = build_global_summary(records, top_limit=15, refined=True)
+
+        reasons = summary["top_watchlist_diagnostics"][0]["stable_failure_reasons"]
+
+        self.assertTrue(any("validation_positive_rate" in reason for reason in reasons))
+        self.assertTrue(any("beats_random_rate" in reason for reason in reasons))
+        self.assertTrue(any("beats_deterministic_rate" in reason for reason in reasons))
+
+    def test_refined_parser_defaults_to_top_15(self):
+        args = build_refined_parser().parse_args([])
+
+        self.assertEqual(args.top_limit, 15)
+        self.assertIn("refined_registry.jsonl", args.registry)
 
     def test_missing_individual_json_does_not_fail(self):
         with tempfile.TemporaryDirectory() as tmp:

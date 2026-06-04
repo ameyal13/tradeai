@@ -194,6 +194,32 @@ def group_by_config_fields(rows: list[dict[str, Any]], fields: list[str]) -> dic
     return {key: summarize_group(group_rows) for key, group_rows in sorted(groups.items())}
 
 
+def stable_failure_reasons(row: dict[str, Any]) -> list[str]:
+    """Explain why a watchlist row did not meet stable_research_candidate rules."""
+    aggregate = row.get("aggregate") or {}
+    reasons: list[str] = []
+    checks = [
+        ("valid_windows", aggregate.get("valid_windows"), 3, ">="),
+        ("validation_positive_rate", aggregate.get("validation_positive_rate"), 0.60, ">="),
+        ("beats_random_rate", aggregate.get("beats_random_rate"), 0.60, ">="),
+        ("beats_deterministic_rate", aggregate.get("beats_deterministic_rate"), 0.50, ">="),
+        ("median_validation_pf", aggregate.get("median_validation_pf"), 1.05, ">"),
+        ("median_validation_avg_return", aggregate.get("median_validation_avg_return"), 0.0, ">"),
+    ]
+    for name, value, threshold, operator in checks:
+        numeric = _float(value)
+        if numeric is None:
+            reasons.append(f"{name}_missing")
+        elif operator == ">=" and numeric < threshold:
+            reasons.append(f"{name}_{numeric}_below_{threshold}")
+        elif operator == ">" and numeric <= threshold:
+            reasons.append(f"{name}_{numeric}_not_above_{threshold}")
+    contradiction = _float(aggregate.get("test_contradiction_rate"))
+    if contradiction is not None and contradiction > 0.40:
+        reasons.append(f"test_contradiction_rate_{contradiction}_above_0.4")
+    return reasons
+
+
 def _row_summary(row: dict[str, Any]) -> dict[str, Any]:
     config = row.get("config") or {}
     aggregate = row.get("aggregate") or {}
@@ -211,6 +237,9 @@ def _row_summary(row: dict[str, Any]) -> dict[str, Any]:
         "beats_random_rate": aggregate.get("beats_random_rate"),
         "beats_deterministic_rate": aggregate.get("beats_deterministic_rate"),
         "worst_validation_drawdown": aggregate.get("worst_validation_drawdown"),
+        "valid_windows": aggregate.get("valid_windows"),
+        "test_contradiction_rate": aggregate.get("test_contradiction_rate"),
+        "stable_failure_reasons": stable_failure_reasons(row),
         "json_path": row.get("json_path"),
         "json_loaded": row.get("json_loaded"),
         "json_missing": row.get("json_missing"),
@@ -232,11 +261,51 @@ def build_conclusion(counts: dict[str, int]) -> list[str]:
     return conclusions
 
 
-def build_global_summary(records: list[dict[str, Any]]) -> dict[str, Any]:
+def _best_group_by_watchlist_then_pf(groups: dict[str, dict[str, Any]]) -> str | None:
+    if not groups:
+        return None
+    return sorted(
+        groups.items(),
+        key=lambda item: (
+            (item[1].get("classification_counts") or {}).get("unstable_watchlist", 0),
+            item[1].get("median_validation_pf") or float("-inf"),
+            item[1].get("median_validation_avg_return") or float("-inf"),
+        ),
+        reverse=True,
+    )[0][0]
+
+
+def build_refined_insights(records: list[dict[str, Any]], groupings: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    cost_modes = sorted({str((row.get("config") or {}).get("cost_mode")) for row in records})
+    return {
+        "dominant_horizon": _best_group_by_watchlist_then_pf(groupings.get("horizon_candles", {})),
+        "dominant_risk_reward": _best_group_by_watchlist_then_pf(groupings.get("risk_reward", {})),
+        "dominant_atr_stop_multiplier": _best_group_by_watchlist_then_pf(groupings.get("atr_stop_multiplier", {})),
+        "cost_modes_tested": cost_modes,
+        "cost_dependency_note": (
+            "All refined 2A configs use low_costs; medium_costs_current was intentionally not tested in this phase."
+            if cost_modes == ["low_costs"]
+            else "Multiple cost modes were tested; compare cost_analysis before treating any setup as robust."
+        ),
+    }
+
+
+def build_global_summary(records: list[dict[str, Any]], top_limit: int = 10, refined: bool = False) -> dict[str, Any]:
     counts = _classification_counts(records)
     completed = [row for row in records if row.get("status") == "completed"]
+    groupings = {
+        "horizon_candles": group_by_config_fields(records, ["horizon_candles"]),
+        "risk_reward": group_by_config_fields(records, ["risk_reward"]),
+        "atr_stop_multiplier": group_by_config_fields(records, ["atr_stop_multiplier"]),
+        "cost_mode": group_by_config_fields(records, ["cost_mode"]),
+        "horizon_rr_atr": group_by_config_fields(records, ["horizon_candles", "risk_reward", "atr_stop_multiplier"]),
+        "horizon_rr_atr_cost": group_by_config_fields(records, ["horizon_candles", "risk_reward", "atr_stop_multiplier", "cost_mode"]),
+    }
+    watchlist = [row for row in records if _classification(row) == "unstable_watchlist"]
     return {
         "generated_at": utc_now(),
+        "report_type": "refined_global_summary" if refined else "global_summary",
+        "top_limit": int(top_limit),
         "guardrails": {
             "research_only": True,
             "no_trading": True,
@@ -259,20 +328,16 @@ def build_global_summary(records: list[dict[str, Any]]) -> dict[str, Any]:
             "json_errors": sum(1 for row in records if row.get("json_error")),
         },
         "top": {
-            "median_validation_pf": [_row_summary(row) for row in _top_rows(records, "median_validation_pf")],
-            "median_validation_avg_return": [_row_summary(row) for row in _top_rows(records, "median_validation_avg_return")],
-            "median_test_pf_diagnostic_only": [_row_summary(row) for row in _top_rows(records, "median_test_pf")],
-            "test_confirm_rate_diagnostic_only": [_row_summary(row) for row in _top_rows(records, "test_confirm_rate")],
+            "median_validation_pf": [_row_summary(row) for row in _top_rows(records, "median_validation_pf", limit=top_limit)],
+            "median_validation_avg_return": [_row_summary(row) for row in _top_rows(records, "median_validation_avg_return", limit=top_limit)],
+            "median_test_pf_diagnostic_only": [_row_summary(row) for row in _top_rows(records, "median_test_pf", limit=top_limit)],
+            "test_confirm_rate_diagnostic_only": [_row_summary(row) for row in _top_rows(records, "test_confirm_rate", limit=top_limit)],
         },
-        "groupings": {
-            "horizon_candles": group_by_config_fields(records, ["horizon_candles"]),
-            "risk_reward": group_by_config_fields(records, ["risk_reward"]),
-            "atr_stop_multiplier": group_by_config_fields(records, ["atr_stop_multiplier"]),
-            "cost_mode": group_by_config_fields(records, ["cost_mode"]),
-            "horizon_rr_atr_cost": group_by_config_fields(records, ["horizon_candles", "risk_reward", "atr_stop_multiplier", "cost_mode"]),
-        },
+        "groupings": groupings,
         "cost_analysis": group_by_config_fields(records, ["cost_mode"]),
         "stability_analysis": summarize_group(records),
+        "top_watchlist_diagnostics": [_row_summary(row) for row in _top_rows(watchlist, "median_validation_pf", limit=top_limit)],
+        "refined_insights": build_refined_insights(records, groupings) if refined else {},
         "conclusion": build_conclusion(counts),
         "records": [_row_summary(row) for row in records],
     }
@@ -306,8 +371,10 @@ def _markdown_group_table(groups: dict[str, dict[str, Any]]) -> list[str]:
 
 def render_markdown(summary: dict[str, Any]) -> str:
     overview = summary["summary"]
+    title = "Refined Research Global Summary" if summary.get("report_type") == "refined_global_summary" else "Research Daemon Global Summary"
+    top_limit = summary.get("top_limit", 10)
     lines = [
-        "# Research Daemon Global Summary",
+        f"# {title}",
         "",
         f"Generated at: `{summary.get('generated_at')}`",
         "",
@@ -334,14 +401,36 @@ def render_markdown(summary: dict[str, Any]) -> str:
         "",
     ]
     lines.extend(f"- {item}" for item in summary.get("conclusion", []))
-    lines.extend(["", "## Top 10 By Median Validation PF", ""])
+    refined = summary.get("refined_insights") or {}
+    if refined:
+        lines.extend([
+            "",
+            "## Refined Insights",
+            "",
+            f"- dominant horizon group: `{refined.get('dominant_horizon')}`",
+            f"- dominant RR group: `{refined.get('dominant_risk_reward')}`",
+            f"- dominant ATR group: `{refined.get('dominant_atr_stop_multiplier')}`",
+            f"- cost modes tested: `{refined.get('cost_modes_tested')}`",
+            f"- cost note: {refined.get('cost_dependency_note')}",
+        ])
+    lines.extend(["", f"## Top {top_limit} By Median Validation PF", ""])
     lines.extend(_markdown_row(row) for row in summary["top"]["median_validation_pf"])
-    lines.extend(["", "## Top 10 By Median Validation Avg Return", ""])
+    lines.extend(["", f"## Top {top_limit} By Median Validation Avg Return", ""])
     lines.extend(_markdown_row(row) for row in summary["top"]["median_validation_avg_return"])
-    lines.extend(["", "## Top 10 By Median Test PF (Diagnostic Only, Not Selectable)", ""])
+    lines.extend(["", f"## Top {top_limit} By Median Test PF (Diagnostic Only, Not Selectable)", ""])
     lines.extend(_markdown_row(row) for row in summary["top"]["median_test_pf_diagnostic_only"])
-    lines.extend(["", "## Top 10 By Test Confirm Rate (Diagnostic Only, Not Selectable)", ""])
+    lines.extend(["", f"## Top {top_limit} By Test Confirm Rate (Diagnostic Only, Not Selectable)", ""])
     lines.extend(_markdown_row(row) for row in summary["top"]["test_confirm_rate_diagnostic_only"])
+    if summary.get("top_watchlist_diagnostics"):
+        lines.extend(["", "## Top Watchlist Diagnostics: Why Not Stable", ""])
+        for row in summary["top_watchlist_diagnostics"]:
+            lines.append(
+                f"- `{row.get('label')}` val+ `{row.get('validation_positive_rate')}`, "
+                f"beats random `{row.get('beats_random_rate')}`, beats det `{row.get('beats_deterministic_rate')}`, "
+                f"test confirm `{row.get('test_confirm_rate')}`, worst DD `{row.get('worst_validation_drawdown')}`, "
+                f"val PF `{row.get('median_validation_pf')}`, val avg `{row.get('median_validation_avg_return')}`, "
+                f"reasons `{row.get('stable_failure_reasons')}`"
+            )
     lines.extend(["", "## Cost Analysis", ""])
     lines.extend(_markdown_group_table(summary["cost_analysis"]))
     lines.extend(["", "## Stability Analysis", ""])
@@ -352,17 +441,23 @@ def render_markdown(summary: dict[str, Any]) -> str:
     lines.extend(_markdown_group_table(summary["groupings"]["risk_reward"]))
     lines.extend(["", "## Groupings By ATR Stop Multiplier", ""])
     lines.extend(_markdown_group_table(summary["groupings"]["atr_stop_multiplier"]))
+    lines.extend(["", "## Groupings By Horizon + RR + ATR", ""])
+    lines.extend(_markdown_group_table(summary["groupings"]["horizon_rr_atr"]))
     lines.extend(["", "## Groupings By Horizon + RR + ATR + Cost", ""])
     lines.extend(_markdown_group_table(summary["groupings"]["horizon_rr_atr_cost"]))
     return "\n".join(lines).rstrip() + "\n"
 
 
-def write_global_summary(summary: dict[str, Any], output_dir: str | Path = DEFAULT_OUTPUT_DIR) -> dict[str, Path]:
+def write_global_summary(
+    summary: dict[str, Any],
+    output_dir: str | Path = DEFAULT_OUTPUT_DIR,
+    filename_prefix: str = "global_summary",
+) -> dict[str, Path]:
     target = Path(output_dir)
     target.mkdir(parents=True, exist_ok=True)
     stamp = utc_stamp()
-    json_path = target / f"global_summary_{stamp}.json"
-    markdown_path = target / f"global_summary_{stamp}.md"
+    json_path = target / f"{filename_prefix}_{stamp}.json"
+    markdown_path = target / f"{filename_prefix}_{stamp}.md"
     summary["json_path"] = str(json_path)
     summary["markdown_path"] = str(markdown_path)
     json_path.write_text(json.dumps(summary, indent=2, sort_keys=True), encoding="utf-8")
@@ -370,11 +465,17 @@ def write_global_summary(summary: dict[str, Any], output_dir: str | Path = DEFAU
     return {"json_path": json_path, "markdown_path": markdown_path}
 
 
-def summarize_registry(registry_path: str | Path = DEFAULT_REGISTRY_PATH, output_dir: str | Path = DEFAULT_OUTPUT_DIR) -> dict[str, Any]:
+def summarize_registry(
+    registry_path: str | Path = DEFAULT_REGISTRY_PATH,
+    output_dir: str | Path = DEFAULT_OUTPUT_DIR,
+    filename_prefix: str = "global_summary",
+    top_limit: int = 10,
+    refined: bool = False,
+) -> dict[str, Any]:
     records = load_latest_registry_records(registry_path)
     enriched = enrich_registry_records(records)
-    summary = build_global_summary(enriched)
-    paths = write_global_summary(summary, output_dir=output_dir)
+    summary = build_global_summary(enriched, top_limit=top_limit, refined=refined)
+    paths = write_global_summary(summary, output_dir=output_dir, filename_prefix=filename_prefix)
     summary["json_path"] = str(paths["json_path"])
     summary["markdown_path"] = str(paths["markdown_path"])
     return summary
@@ -384,12 +485,21 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Summarize Research Daemon registry.")
     parser.add_argument("--registry", default=str(DEFAULT_REGISTRY_PATH))
     parser.add_argument("--output-dir", default=str(DEFAULT_OUTPUT_DIR))
+    parser.add_argument("--filename-prefix", default="global_summary")
+    parser.add_argument("--top-limit", type=int, default=10)
+    parser.add_argument("--refined", action="store_true")
     return parser
 
 
 def main() -> None:
     args = build_parser().parse_args()
-    summary = summarize_registry(args.registry, args.output_dir)
+    summary = summarize_registry(
+        args.registry,
+        args.output_dir,
+        filename_prefix=args.filename_prefix,
+        top_limit=args.top_limit,
+        refined=args.refined,
+    )
     overview = summary["summary"]
     print("Research registry global summary generated")
     print(f"unique_configs: {overview['unique_configs']}")
