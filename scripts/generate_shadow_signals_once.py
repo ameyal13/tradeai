@@ -65,12 +65,13 @@ def load_candidate_configs(
     symbols: list[str] | None = None,
     allow_watchlist_shadow: bool = False,
     min_classification: str = "stable_research_candidate",
+    include_not_allowed: bool = False,
 ) -> list[dict[str, Any]]:
     """Load selectable configs from a registry without using test metrics."""
     allowed = {"stable_research_candidate"}
-    if allow_watchlist_shadow or min_classification == "unstable_watchlist":
+    if allow_watchlist_shadow or min_classification == "unstable_watchlist" or include_not_allowed:
         allowed.add("unstable_watchlist")
-    if min_classification == "stable_research_candidate":
+    if min_classification == "stable_research_candidate" and not include_not_allowed:
         allowed = {"stable_research_candidate"} if not allow_watchlist_shadow else allowed
     symbol_filter = {symbol.upper() for symbol in symbols} if symbols else None
     configs: list[dict[str, Any]] = []
@@ -87,6 +88,54 @@ def load_candidate_configs(
         config["_source_classification"] = classification
         configs.append(config)
     return configs
+
+
+def classify_signal_skip(signal: dict[str, Any]) -> dict[str, Any] | None:
+    """Return a skip row for HOLD/invalid generated signals, otherwise None."""
+    raw_signal = str(signal.get("signal", "HOLD")).upper()
+    input_features = signal.get("input_features") or {}
+    if raw_signal == "HOLD":
+        return {
+            "status": "skipped_hold",
+            "skip_reason": "la señal actual fue HOLD",
+            "signal": raw_signal,
+            "hold_reason": input_features.get("hold_reason"),
+            "probability_buy_win": input_features.get("probability_buy_win"),
+            "probability_sell_win": input_features.get("probability_sell_win"),
+            "confidence": signal.get("confidence"),
+            "reasoning": signal.get("reasoning"),
+        }
+    try:
+        entry = float(signal.get("entry_price") or 0)
+    except (TypeError, ValueError):
+        entry = 0.0
+    stop_loss = signal.get("stop_loss")
+    take_profit = signal.get("take_profit")
+    try:
+        stop = float(stop_loss) if stop_loss is not None else None
+        target = float(take_profit) if take_profit is not None else None
+    except (TypeError, ValueError):
+        stop = None
+        target = None
+    invalid_levels = (
+        raw_signal not in {"BUY", "SELL"}
+        or entry <= 0
+        or stop is None
+        or target is None
+        or (raw_signal == "BUY" and not (stop < entry < target))
+        or (raw_signal == "SELL" and not (target < entry < stop))
+    )
+    if invalid_levels:
+        return {
+            "status": "skipped_invalid_levels",
+            "skip_reason": "entry/SL/TP inválidos",
+            "signal": raw_signal,
+            "entry_price": signal.get("entry_price"),
+            "stop_loss": signal.get("stop_loss"),
+            "take_profit": signal.get("take_profit"),
+            "confidence": signal.get("confidence"),
+        }
+    return None
 
 
 async def generate_shadow_signals_once(
@@ -109,6 +158,7 @@ async def generate_shadow_signals_once(
         symbols=selected_symbols,
         allow_watchlist_shadow=allow_watchlist_shadow,
         min_classification=min_classification,
+        include_not_allowed=True,
     )
     rows: list[dict[str, Any]] = []
     opened = 0
@@ -127,29 +177,61 @@ async def generate_shadow_signals_once(
             "research_only": True,
         }
         if classification == "unstable_watchlist" and not allow_watchlist_shadow:
-            rows.append({**base_row, "status": "skipped_watchlist_requires_flag"})
+            rows.append({
+                **base_row,
+                "status": "skipped_not_allowed",
+                "skip_reason": "watchlist sin --allow-watchlist-shadow",
+            })
             continue
         if journal.has_open_signal(config_id, symbol, timeframe):
-            rows.append({**base_row, "status": "skipped_duplicate_open"})
+            rows.append({
+                **base_row,
+                "status": "skipped_duplicate_open",
+                "skip_reason": "ya existe señal OPEN para esta config/symbol/timeframe",
+            })
             continue
         try:
-            loaded = await load_experiment_candles(
-                symbol,
-                timeframe,
-                max_candles=int(config.get("max_candles", 1500)),
-                use_cache=True,
-                refresh_cache=bool(refresh_cache),
-            )
+            try:
+                loaded = await load_experiment_candles(
+                    symbol,
+                    timeframe,
+                    max_candles=int(config.get("max_candles", 1500)),
+                    use_cache=True,
+                    refresh_cache=bool(refresh_cache),
+                )
+                candles = loaded.get("candles")
+                if candles is None or len(candles) == 0:
+                    rows.append({
+                        **base_row,
+                        "status": "skipped_no_price",
+                        "skip_reason": "no se pudo obtener precio/candles",
+                        "error_type": "empty_candles",
+                        "error_message": "No candles loaded for shadow signal generation.",
+                    })
+                    continue
+            except Exception as exc:  # noqa: BLE001 - classify data/price failures.
+                rows.append({
+                    **base_row,
+                    "status": "skipped_no_price",
+                    "skip_reason": "no se pudo obtener precio/candles",
+                    "error_type": type(exc).__name__,
+                    "error_message": str(exc)[:180],
+                })
+                continue
             horizon_minutes = horizon_minutes_from_candles(int(config["horizon_candles"]), timeframe)
             params = strategy_params_from_config(config)
             params["use_sentiment"] = True
             signal = generate_strategy_signal_from_df(
-                loaded["candles"],
+                candles,
                 strategy_mode=str(config.get("strategy_mode", "xgboost")),
                 provider="none",
                 horizon_minutes=horizon_minutes,
                 strategy_params=params,
             ).to_dict()
+            skip = classify_signal_skip(signal)
+            if skip:
+                rows.append({**base_row, **skip})
+                continue
             costs = cost_profile_for_config(config)
             shadow = build_shadow_signal_from_strategy(
                 config=config,
@@ -160,7 +242,12 @@ async def generate_shadow_signals_once(
                 watchlist_shadow=classification == "unstable_watchlist",
             )
             if shadow is None:
-                rows.append({**base_row, "status": "skipped_hold", "signal": signal.get("signal")})
+                rows.append({
+                    **base_row,
+                    "status": "skipped_invalid_levels",
+                    "skip_reason": "entry/SL/TP inválidos",
+                    "signal": signal.get("signal"),
+                })
                 continue
             review = review_shadow_signal(SignalReviewRequest(
                 symbol=symbol,
@@ -176,15 +263,23 @@ async def generate_shadow_signals_once(
             if review.review_status == "BLOCK":
                 shadow["status"] = BLOCKED
                 shadow["notes"] = f"{shadow.get('notes', '')} | BLOCKED by agent review"
+                shadow["skip_reason"] = "agent review bloqueó"
             if not dry_run:
                 shadow = journal.create_signal(shadow)
                 if notify_telegram:
                     send_telegram_message(format_shadow_signal_opened(shadow))
-            rows.append({**shadow, "dry_run": bool(dry_run)})
+            output_status = "skipped_agent_block" if shadow["status"] == BLOCKED else shadow["status"]
+            rows.append({**shadow, "status": output_status, "journal_status": shadow["status"], "dry_run": bool(dry_run)})
             if shadow["status"] != BLOCKED:
                 opened += 1
         except Exception as exc:  # noqa: BLE001 - one config should not stop the batch.
-            rows.append({**base_row, "status": "error", "error": f"{type(exc).__name__}: {exc}"})
+            rows.append({
+                **base_row,
+                "status": "skipped_error",
+                "skip_reason": "excepción controlada",
+                "error_type": type(exc).__name__,
+                "error_message": str(exc)[:180],
+            })
     if not configs:
         rows.append({
             "status": "no_selectable_configs",
@@ -196,24 +291,65 @@ async def generate_shadow_signals_once(
     return rows
 
 
-def print_rows(rows: list[dict[str, Any]]) -> None:
+def summarize_generation_rows(rows: list[dict[str, Any]], journal_path: str | Path = DEFAULT_SHADOW_JOURNAL_PATH) -> dict[str, Any]:
+    statuses: dict[str, int] = {}
     for row in rows:
-        print(
-            " | ".join([
+        status = str(row.get("status"))
+        statuses[status] = statuses.get(status, 0) + 1
+    return {
+        "selected_configs": sum(1 for row in rows if row.get("config_id")),
+        "opened_signals": statuses.get("OPEN", 0),
+        "skipped_hold": statuses.get("skipped_hold", 0),
+        "skipped_duplicate_open": statuses.get("skipped_duplicate_open", 0),
+        "skipped_errors": statuses.get("skipped_error", 0) + statuses.get("skipped_no_price", 0),
+        "status_counts": statuses,
+        "journal_path": str(journal_path),
+    }
+
+
+def print_rows(rows: list[dict[str, Any]], journal_path: str | Path = DEFAULT_SHADOW_JOURNAL_PATH) -> None:
+    for row in rows:
+        status = row.get("status")
+        parts = [
                 f"status={row.get('status')}",
                 f"symbol={row.get('symbol', '')}",
                 f"timeframe={row.get('timeframe', '')}",
+                f"config_id={row.get('config_id', '')}",
+                f"classification={row.get('classification', '')}",
+        ]
+        if status not in {"skipped_hold", "skipped_not_allowed", "skipped_duplicate_open", "skipped_no_price", "skipped_error"}:
+            parts.extend([
                 f"side={row.get('side', '')}",
                 f"entry={row.get('entry_price', '')}",
                 f"sl={row.get('stop_loss', '')}",
                 f"tp={row.get('take_profit', '')}",
                 f"horizon_candles={row.get('horizon_candles', '')}",
                 f"horizon_minutes={row.get('horizon_minutes', '')}",
-                f"config_id={row.get('config_id', '')}",
-                f"classification={row.get('classification', '')}",
-                f"error={row.get('error', '')}",
             ])
-        )
+        if row.get("skip_reason"):
+            parts.append(f"reason={row.get('skip_reason')}")
+        if status == "skipped_hold":
+            parts.extend([
+                f"hold_reason={row.get('hold_reason', '')}",
+                f"prob_buy={row.get('probability_buy_win', '')}",
+                f"prob_sell={row.get('probability_sell_win', '')}",
+                f"confidence={row.get('confidence', '')}",
+            ])
+        if row.get("error_type") or row.get("error_message"):
+            parts.extend([
+                f"error_type={row.get('error_type', '')}",
+                f"error_message={row.get('error_message', '')}",
+            ])
+        print(" | ".join(parts))
+    summary = summarize_generation_rows(rows, journal_path=journal_path)
+    print("Summary")
+    print(f"selected configs: {summary['selected_configs']}")
+    print(f"opened signals: {summary['opened_signals']}")
+    print(f"skipped_hold: {summary['skipped_hold']}")
+    print(f"skipped_duplicate_open: {summary['skipped_duplicate_open']}")
+    print(f"skipped_errors: {summary['skipped_errors']}")
+    print(f"status_counts: {summary['status_counts']}")
+    print(f"journal_path: {summary['journal_path']}")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -244,7 +380,7 @@ async def main() -> None:
         journal_path=args.journal_path,
         refresh_cache=args.refresh_cache,
     )
-    print_rows(rows)
+    print_rows(rows, journal_path=args.journal_path)
 
 
 if __name__ == "__main__":

@@ -2,6 +2,7 @@ import json
 import os
 import tempfile
 import unittest
+from io import StringIO
 from datetime import timedelta
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
@@ -17,8 +18,11 @@ from research.telegram_notifier import (
 )
 from scripts.generate_shadow_signals_once import (
     build_parser as build_generate_parser,
+    classify_signal_skip,
     generate_shadow_signals_once,
     load_candidate_configs,
+    print_rows,
+    summarize_generation_rows,
 )
 from scripts.evaluate_shadow_signals_once import build_parser as build_evaluate_parser
 from tools.prediction_journal import utc_now
@@ -111,7 +115,8 @@ class ShadowSignalEngineTests(unittest.IsolatedAsyncioTestCase):
                 max_signals=1,
             )
 
-        self.assertEqual(rows[0]["status"], "no_selectable_configs")
+        self.assertEqual(rows[0]["status"], "skipped_not_allowed")
+        self.assertIn("--allow-watchlist-shadow", rows[0]["skip_reason"])
 
     async def test_allow_watchlist_generates_marked_shadow_signal(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -181,8 +186,82 @@ class ShadowSignalEngineTests(unittest.IsolatedAsyncioTestCase):
                             refresh_cache=False,
                         )
 
-        self.assertEqual(rows[0]["status"], "BLOCKED")
+        self.assertEqual(rows[0]["status"], "skipped_agent_block")
+        self.assertEqual(rows[0]["journal_status"], "BLOCKED")
         self.assertIn("BLOCKED", rows[0]["notes"])
+
+    async def test_hold_signal_reports_explicit_hold_reason(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            registry = Path(tmp) / "registry.jsonl"
+            journal = Path(tmp) / "shadow.jsonl"
+            write_registry(registry, [registry_row(classification="unstable_watchlist")])
+            hold = FakeStrategySignal(signal="HOLD").to_dict()
+            hold["input_features"] = {
+                "hold_reason": "probabilities_below_threshold",
+                "probability_buy_win": 0.41,
+                "probability_sell_win": 0.39,
+            }
+            with patch("scripts.generate_shadow_signals_once.load_experiment_candles", new=AsyncMock(return_value={
+                "candles": sample_candles("2026-01-01", 300),
+            })):
+                with patch("scripts.generate_shadow_signals_once.generate_strategy_signal_from_df", return_value=FakeStrategySignal(signal="HOLD")) as gen:
+                    gen.return_value.to_dict = lambda: hold
+                    rows = await generate_shadow_signals_once(
+                        registry=str(registry),
+                        journal_path=journal,
+                        allow_watchlist_shadow=True,
+                        max_signals=1,
+                        dry_run=True,
+                        refresh_cache=False,
+                    )
+
+        self.assertEqual(rows[0]["status"], "skipped_hold")
+        self.assertEqual(rows[0]["hold_reason"], "probabilities_below_threshold")
+        self.assertEqual(rows[0]["probability_buy_win"], 0.41)
+        self.assertFalse(journal.exists())
+
+    async def test_no_price_is_reported_separately(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            registry = Path(tmp) / "registry.jsonl"
+            journal = Path(tmp) / "shadow.jsonl"
+            write_registry(registry, [registry_row(classification="unstable_watchlist")])
+            with patch("scripts.generate_shadow_signals_once.load_experiment_candles", new=AsyncMock(side_effect=RuntimeError("network down"))):
+                rows = await generate_shadow_signals_once(
+                    registry=str(registry),
+                    journal_path=journal,
+                    allow_watchlist_shadow=True,
+                    max_signals=1,
+                    dry_run=True,
+                    refresh_cache=False,
+                )
+
+        self.assertEqual(rows[0]["status"], "skipped_no_price")
+        self.assertEqual(rows[0]["error_type"], "RuntimeError")
+        self.assertIn("network down", rows[0]["error_message"])
+
+    async def test_invalid_levels_are_reported(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            registry = Path(tmp) / "registry.jsonl"
+            journal = Path(tmp) / "shadow.jsonl"
+            write_registry(registry, [registry_row(classification="unstable_watchlist")])
+            invalid = FakeStrategySignal(signal="BUY").to_dict()
+            invalid["stop_loss"] = 105.0
+            with patch("scripts.generate_shadow_signals_once.load_experiment_candles", new=AsyncMock(return_value={
+                "candles": sample_candles("2026-01-01", 300),
+            })):
+                with patch("scripts.generate_shadow_signals_once.generate_strategy_signal_from_df", return_value=FakeStrategySignal(signal="BUY")) as gen:
+                    gen.return_value.to_dict = lambda: invalid
+                    rows = await generate_shadow_signals_once(
+                        registry=str(registry),
+                        journal_path=journal,
+                        allow_watchlist_shadow=True,
+                        max_signals=1,
+                        dry_run=True,
+                        refresh_cache=False,
+                    )
+
+        self.assertEqual(rows[0]["status"], "skipped_invalid_levels")
+        self.assertIn("entry/SL/TP", rows[0]["skip_reason"])
 
 
 class ShadowEvaluationTests(unittest.TestCase):
@@ -267,6 +346,16 @@ class ShadowSupportTests(unittest.TestCase):
 
         self.assertEqual(configs, [])
 
+    def test_candidate_loader_can_include_not_allowed_for_diagnostics(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            registry = Path(tmp) / "registry.jsonl"
+            write_registry(registry, [registry_row(classification="unstable_watchlist")])
+
+            configs = load_candidate_configs(registry, allow_watchlist_shadow=False, include_not_allowed=True)
+
+        self.assertEqual(len(configs), 1)
+        self.assertEqual(configs[0]["_source_classification"], "unstable_watchlist")
+
     def test_agent_review_cannot_modify_trade_levels(self):
         request = SignalReviewRequest(
             symbol="SOL",
@@ -346,6 +435,58 @@ class ShadowSupportTests(unittest.TestCase):
 
         eval_args = build_evaluate_parser().parse_args(["--notify-telegram"])
         self.assertTrue(eval_args.notify_telegram)
+
+    def test_classify_signal_skip_hold_and_invalid_levels(self):
+        hold = FakeStrategySignal(signal="HOLD").to_dict()
+        hold["input_features"] = {"hold_reason": "probabilities_below_threshold"}
+        self.assertEqual(classify_signal_skip(hold)["status"], "skipped_hold")
+
+        invalid = FakeStrategySignal(signal="BUY").to_dict()
+        invalid["take_profit"] = 90.0
+        self.assertEqual(classify_signal_skip(invalid)["status"], "skipped_invalid_levels")
+
+    def test_generation_summary_counts_statuses(self):
+        rows = [
+            {"status": "OPEN", "config_id": "a"},
+            {"status": "skipped_hold", "config_id": "b"},
+            {"status": "skipped_duplicate_open", "config_id": "c"},
+            {"status": "skipped_error", "config_id": "d"},
+            {"status": "skipped_no_price", "config_id": "e"},
+        ]
+
+        summary = summarize_generation_rows(rows, journal_path="data/shadow.jsonl")
+
+        self.assertEqual(summary["selected_configs"], 5)
+        self.assertEqual(summary["opened_signals"], 1)
+        self.assertEqual(summary["skipped_hold"], 1)
+        self.assertEqual(summary["skipped_duplicate_open"], 1)
+        self.assertEqual(summary["skipped_errors"], 2)
+        self.assertEqual(summary["journal_path"], "data/shadow.jsonl")
+
+    def test_print_rows_omits_empty_levels_for_skipped_hold_and_prints_summary(self):
+        rows = [{
+            "status": "skipped_hold",
+            "symbol": "SOL",
+            "timeframe": "1h",
+            "config_id": "cfg1",
+            "classification": "unstable_watchlist",
+            "skip_reason": "la señal actual fue HOLD",
+            "hold_reason": "probabilities_below_threshold",
+            "probability_buy_win": 0.4,
+            "probability_sell_win": 0.3,
+            "confidence": 40,
+        }]
+        stream = StringIO()
+        with patch("sys.stdout", stream):
+            print_rows(rows, journal_path="data/shadow.jsonl")
+
+        output = stream.getvalue()
+        self.assertIn("status=skipped_hold", output)
+        self.assertIn("hold_reason=probabilities_below_threshold", output)
+        self.assertNotIn("side=", output)
+        self.assertNotIn("entry=", output)
+        self.assertIn("Summary", output)
+        self.assertIn("journal_path: data/shadow.jsonl", output)
 
 
 if __name__ == "__main__":
