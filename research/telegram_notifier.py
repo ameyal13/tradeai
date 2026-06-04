@@ -114,3 +114,76 @@ def format_autopilot_summary_for_telegram(
         "Research only. No trading signal.",
     ])
     return "\n".join(lines)[:3900]
+
+
+def format_shadow_signal_opened(signal: dict[str, Any]) -> str:
+    """Plain-text Telegram message for a shadow signal opening."""
+    mode = "WATCHLIST SHADOW ONLY" if signal.get("watchlist_shadow") else "STABLE SHADOW"
+    review = signal.get("agent_review") or {}
+    risk_flags = review.get("risk_flags") or []
+    risk_flag_text = ", ".join(str(flag) for flag in risk_flags) if risk_flags else "none"
+    lines = [
+        f"{mode}",
+        "Research only. No trading signal.",
+        "",
+        f"Symbol: {signal.get('symbol')} {signal.get('timeframe')}",
+        f"Side: {signal.get('side')}",
+        f"Entry: {signal.get('entry_price')}",
+        f"SL: {signal.get('stop_loss')}",
+        f"TP: {signal.get('take_profit')}",
+        f"RR: {signal.get('risk_reward')}",
+        f"Horizon: {signal.get('horizon_candles')} candles / {signal.get('horizon_minutes')} minutes",
+        f"Confidence: {signal.get('confidence')}",
+        f"Config: {signal.get('config_id')}",
+        f"Classification: {signal.get('classification')}",
+        f"Agent review: {review.get('review_status', 'not_run')}",
+        f"Risk flags: {risk_flag_text}",
+        "",
+        "No exchange order was placed.",
+    ]
+    return "\n".join(str(line) for line in lines)[:3900]
+
+
+def format_shadow_signal_evaluated(signal: dict[str, Any]) -> str:
+    """Plain-text Telegram message for a shadow signal outcome."""
+    lines = [
+        "Shadow signal evaluated",
+        "Research only. No trading signal.",
+        "",
+        f"Symbol: {signal.get('symbol')} {signal.get('timeframe')}",
+        f"Side: {signal.get('side')}",
+        f"Outcome: {signal.get('outcome')}",
+        f"Exit price: {signal.get('exit_price')}",
+        f"PnL pct: {signal.get('pnl_pct')}",
+        f"Exit reason: {signal.get('exit_reason')}",
+        f"Fees: {signal.get('fees')}",
+        f"Slippage/spread cost: {signal.get('slippage')}",
+        f"Cost pct: commission={signal.get('commission_pct')} slippage={signal.get('slippage_pct')} spread={signal.get('spread_pct')}",
+        f"Config: {signal.get('config_id')}",
+    ]
+    return "\n".join(str(line) for line in lines)[:3900]
+
+
+def format_shadow_daily_summary(signals: list[dict[str, Any]]) -> str:
+    """Plain-text summary for closed shadow signals."""
+    total = len(signals)
+    wins = sum(1 for row in signals if row.get("outcome") == "WIN")
+    losses = sum(1 for row in signals if row.get("outcome") == "LOSS")
+    expired = sum(1 for row in signals if row.get("outcome") == "EXPIRED")
+    returns = [float(row.get("pnl_pct") or 0) for row in signals]
+    profits = sum(value for value in returns if value > 0)
+    loss_sum = abs(sum(value for value in returns if value < 0))
+    profit_factor = round(profits / loss_sum, 6) if loss_sum else None
+    avg_return = round(sum(returns) / total, 6) if total else 0
+    win_rate = round(wins / total * 100, 6) if total else 0
+    lines = [
+        "Shadow summary",
+        "Research only. No trading signal.",
+        "",
+        f"Total signals: {total}",
+        f"Wins/losses/expired: {wins}/{losses}/{expired}",
+        f"Win rate: {win_rate}",
+        f"Profit factor: {profit_factor}",
+        f"Average return pct: {avg_return}",
+    ]
+    return "\n".join(lines)[:3900]
