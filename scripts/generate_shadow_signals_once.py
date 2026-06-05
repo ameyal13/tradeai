@@ -148,9 +148,10 @@ async def generate_shadow_signals_once(
     min_classification: str = "stable_research_candidate",
     journal_path: str | Path = DEFAULT_SHADOW_JOURNAL_PATH,
     refresh_cache: bool = True,
+    max_configs: int | None = None,
 ) -> list[dict[str, Any]]:
     registry_path = registry_path_from_choice(registry)
-    journal = ShadowSignalJournal(journal_path)
+    journal = None if dry_run else ShadowSignalJournal(journal_path)
     source_registry = "registry" if registry == "general" else "refined_registry" if registry == "refined" else str(registry_path)
     selected_symbols = normalize_crypto_symbols(symbols) if symbols else None
     configs = load_candidate_configs(
@@ -162,9 +163,13 @@ async def generate_shadow_signals_once(
     )
     rows: list[dict[str, Any]] = []
     opened = 0
+    attempted = 0
     for config in configs:
         if opened >= max_signals:
             break
+        if max_configs is not None and attempted >= int(max_configs):
+            break
+        attempted += 1
         classification = str(config.get("_source_classification"))
         config_id = str(config.get("config_id") or config.get("experiment_id"))
         symbol = str(config.get("symbol", "")).upper()
@@ -183,7 +188,7 @@ async def generate_shadow_signals_once(
                 "skip_reason": "watchlist sin --allow-watchlist-shadow",
             })
             continue
-        if journal.has_open_signal(config_id, symbol, timeframe):
+        if journal is not None and journal.has_open_signal(config_id, symbol, timeframe):
             rows.append({
                 **base_row,
                 "status": "skipped_duplicate_open",

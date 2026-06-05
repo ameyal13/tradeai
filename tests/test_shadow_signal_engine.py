@@ -220,6 +220,31 @@ class ShadowSignalEngineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(rows[0]["probability_buy_win"], 0.41)
         self.assertFalse(journal.exists())
 
+    async def test_max_configs_limits_hold_iterations(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            registry = Path(tmp) / "registry.jsonl"
+            journal = Path(tmp) / "shadow.jsonl"
+            write_registry(registry, [
+                registry_row(config_id="cfg1", classification="unstable_watchlist"),
+                registry_row(config_id="cfg2", classification="unstable_watchlist"),
+            ])
+            with patch("scripts.generate_shadow_signals_once.load_experiment_candles", new=AsyncMock(return_value={
+                "candles": sample_candles("2026-01-01", 300),
+            })):
+                with patch("scripts.generate_shadow_signals_once.generate_strategy_signal_from_df", return_value=FakeStrategySignal(signal="HOLD")):
+                    rows = await generate_shadow_signals_once(
+                        registry=str(registry),
+                        journal_path=journal,
+                        allow_watchlist_shadow=True,
+                        max_signals=5,
+                        max_configs=1,
+                        dry_run=True,
+                        refresh_cache=False,
+                    )
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["status"], "skipped_hold")
+
     async def test_no_price_is_reported_separately(self):
         with tempfile.TemporaryDirectory() as tmp:
             registry = Path(tmp) / "registry.jsonl"
