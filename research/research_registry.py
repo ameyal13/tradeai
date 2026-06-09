@@ -68,7 +68,12 @@ class ResearchRegistry:
             if row.get("status") == "completed"
         }
 
-    def should_run(self, config: dict[str, Any], retry_failed: bool = False) -> bool:
+    def should_run(
+        self,
+        config: dict[str, Any],
+        retry_failed: bool = False,
+        retry_running: bool = False,
+    ) -> bool:
         cid = config.get("config_id") or config_id(config)
         row = self.latest_by_config().get(str(cid))
         if row is None:
@@ -78,10 +83,20 @@ class ResearchRegistry:
             return False
         if status == "failed":
             return bool(retry_failed)
+        if status == "running":
+            return bool(retry_running)
         return False
 
-    def filter_runnable(self, configs: list[dict[str, Any]], retry_failed: bool = False) -> list[dict[str, Any]]:
-        return [config for config in configs if self.should_run(config, retry_failed=retry_failed)]
+    def filter_runnable(
+        self,
+        configs: list[dict[str, Any]],
+        retry_failed: bool = False,
+        retry_running: bool = False,
+    ) -> list[dict[str, Any]]:
+        return [
+            config for config in configs
+            if self.should_run(config, retry_failed=retry_failed, retry_running=retry_running)
+        ]
 
     def mark_running(self, config: dict[str, Any]) -> dict[str, Any]:
         cid = config.get("config_id") or config_id(config)

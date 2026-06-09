@@ -72,6 +72,23 @@ class ResearchRegistryTests(unittest.TestCase):
             self.assertEqual(registry.filter_runnable([row], retry_failed=False), [])
             self.assertEqual(registry.filter_runnable([row], retry_failed=True), [row])
 
+    def test_retry_running_only_with_flag(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            registry = ResearchRegistry(Path(tmp) / "registry.jsonl")
+            row = config()
+            registry.mark_running(row)
+
+            self.assertEqual(registry.filter_runnable([row], retry_running=False), [])
+            self.assertEqual(registry.filter_runnable([row], retry_running=True), [row])
+
+    def test_completed_not_retried_even_with_retry_running(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            registry = ResearchRegistry(Path(tmp) / "registry.jsonl")
+            row = config()
+            registry.mark_finished(row, status="completed", classification="multi_window_reject")
+
+            self.assertEqual(registry.filter_runnable([row], retry_running=True), [])
+
 
 if __name__ == "__main__":
     unittest.main()

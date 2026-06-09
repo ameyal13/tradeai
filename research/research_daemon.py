@@ -321,6 +321,7 @@ async def run_research_cycle(
     max_configs_per_cycle: int = 5,
     resume: bool = True,
     retry_failed: bool = False,
+    retry_running: bool = False,
     notify_telegram: bool = False,
     grid: list[dict[str, Any]] | None = None,
     registry_path: str | Path = DEFAULT_REGISTRY_PATH,
@@ -332,7 +333,11 @@ async def run_research_cycle(
     """Run one controlled daemon cycle."""
     registry = ResearchRegistry(registry_path)
     active_grid = grid if grid is not None else build_daemon_grid()
-    runnable = registry.filter_runnable(active_grid, retry_failed=retry_failed) if resume else active_grid
+    runnable = (
+        registry.filter_runnable(active_grid, retry_failed=retry_failed, retry_running=retry_running)
+        if resume
+        else active_grid
+    )
     selected = runnable[: max(0, int(max_configs_per_cycle))]
     results: list[dict[str, Any]] = []
     interrupted = False
