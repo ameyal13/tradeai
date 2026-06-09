@@ -28,6 +28,7 @@ from tools.shadow_signal_journal import (  # noqa: E402
     build_shadow_signal_from_strategy,
     cost_profile_for_config,
     horizon_minutes_from_candles,
+    shadow_signals_are_similar,
 )
 from tools.strategy_signals import generate_strategy_signal_from_df  # noqa: E402
 
@@ -149,6 +150,7 @@ async def generate_shadow_signals_once(
     journal_path: str | Path = DEFAULT_SHADOW_JOURNAL_PATH,
     refresh_cache: bool = True,
     max_configs: int | None = None,
+    max_configs_scanned: int | None = None,
 ) -> list[dict[str, Any]]:
     registry_path = registry_path_from_choice(registry)
     journal = None if dry_run else ShadowSignalJournal(journal_path)
@@ -162,12 +164,14 @@ async def generate_shadow_signals_once(
         include_not_allowed=True,
     )
     rows: list[dict[str, Any]] = []
+    opened_this_batch: list[dict[str, Any]] = []
     opened = 0
     attempted = 0
+    scan_limit = max_configs_scanned if max_configs_scanned is not None else max_configs
     for config in configs:
         if opened >= max_signals:
             break
-        if max_configs is not None and attempted >= int(max_configs):
+        if scan_limit is not None and attempted >= int(scan_limit):
             break
         attempted += 1
         classification = str(config.get("_source_classification"))
@@ -254,6 +258,24 @@ async def generate_shadow_signals_once(
                     "signal": signal.get("signal"),
                 })
                 continue
+            similar = next((row for row in opened_this_batch if shadow_signals_are_similar(row, shadow)), None)
+            if similar is None and journal is not None:
+                similar = journal.find_open_similar_signal(shadow)
+            if similar is not None:
+                rows.append({
+                    **base_row,
+                    "status": "skipped_duplicate_open_similar",
+                    "skip_reason": "ya existe senal OPEN similar para symbol/timeframe/side/niveles",
+                    "duplicate_reason": "same_symbol_timeframe_side_entry_stop_take_profit",
+                    "duplicate_shadow_signal_id": similar.get("shadow_signal_id"),
+                    "duplicate_config_id": similar.get("config_id"),
+                    "duplicate_horizon_candles": similar.get("horizon_candles"),
+                    "side": shadow.get("side"),
+                    "entry_price": shadow.get("entry_price"),
+                    "stop_loss": shadow.get("stop_loss"),
+                    "take_profit": shadow.get("take_profit"),
+                })
+                continue
             review = review_shadow_signal(SignalReviewRequest(
                 symbol=symbol,
                 timeframe=timeframe,
@@ -276,6 +298,7 @@ async def generate_shadow_signals_once(
             output_status = "skipped_agent_block" if shadow["status"] == BLOCKED else shadow["status"]
             rows.append({**shadow, "status": output_status, "journal_status": shadow["status"], "dry_run": bool(dry_run)})
             if shadow["status"] != BLOCKED:
+                opened_this_batch.append(shadow)
                 opened += 1
         except Exception as exc:  # noqa: BLE001 - one config should not stop the batch.
             rows.append({
@@ -296,17 +319,27 @@ async def generate_shadow_signals_once(
     return rows
 
 
-def summarize_generation_rows(rows: list[dict[str, Any]], journal_path: str | Path = DEFAULT_SHADOW_JOURNAL_PATH) -> dict[str, Any]:
+def summarize_generation_rows(
+    rows: list[dict[str, Any]],
+    journal_path: str | Path = DEFAULT_SHADOW_JOURNAL_PATH,
+    max_signals: int | None = None,
+    max_configs_scanned: int | None = None,
+) -> dict[str, Any]:
     statuses: dict[str, int] = {}
     for row in rows:
         status = str(row.get("status"))
         statuses[status] = statuses.get(status, 0) + 1
+    configs_scanned = sum(1 for row in rows if row.get("config_id"))
     return {
-        "selected_configs": sum(1 for row in rows if row.get("config_id")),
+        "selected_configs": configs_scanned,
+        "configs_scanned": configs_scanned,
         "opened_signals": statuses.get("OPEN", 0),
         "skipped_hold": statuses.get("skipped_hold", 0),
         "skipped_duplicate_open": statuses.get("skipped_duplicate_open", 0),
+        "skipped_duplicate_similar": statuses.get("skipped_duplicate_open_similar", 0),
         "skipped_errors": statuses.get("skipped_error", 0) + statuses.get("skipped_no_price", 0),
+        "max_signals": max_signals,
+        "max_configs_scanned": max_configs_scanned,
         "status_counts": statuses,
         "journal_path": str(journal_path),
     }
@@ -322,7 +355,14 @@ def print_rows(rows: list[dict[str, Any]], journal_path: str | Path = DEFAULT_SH
                 f"config_id={row.get('config_id', '')}",
                 f"classification={row.get('classification', '')}",
         ]
-        if status not in {"skipped_hold", "skipped_not_allowed", "skipped_duplicate_open", "skipped_no_price", "skipped_error"}:
+        if status not in {
+            "skipped_hold",
+            "skipped_not_allowed",
+            "skipped_duplicate_open",
+            "skipped_duplicate_open_similar",
+            "skipped_no_price",
+            "skipped_error",
+        }:
             parts.extend([
                 f"side={row.get('side', '')}",
                 f"entry={row.get('entry_price', '')}",
@@ -333,6 +373,9 @@ def print_rows(rows: list[dict[str, Any]], journal_path: str | Path = DEFAULT_SH
             ])
         if row.get("skip_reason"):
             parts.append(f"reason={row.get('skip_reason')}")
+        if row.get("duplicate_reason"):
+            parts.append(f"duplicate_reason={row.get('duplicate_reason')}")
+            parts.append(f"duplicate_config_id={row.get('duplicate_config_id', '')}")
         if status == "skipped_hold":
             parts.extend([
                 f"hold_reason={row.get('hold_reason', '')}",
@@ -349,10 +392,14 @@ def print_rows(rows: list[dict[str, Any]], journal_path: str | Path = DEFAULT_SH
     summary = summarize_generation_rows(rows, journal_path=journal_path)
     print("Summary")
     print(f"selected configs: {summary['selected_configs']}")
+    print(f"configs_scanned: {summary['configs_scanned']}")
     print(f"opened signals: {summary['opened_signals']}")
     print(f"skipped_hold: {summary['skipped_hold']}")
     print(f"skipped_duplicate_open: {summary['skipped_duplicate_open']}")
+    print(f"skipped_duplicate_similar: {summary['skipped_duplicate_similar']}")
     print(f"skipped_errors: {summary['skipped_errors']}")
+    print(f"max_signals: {summary['max_signals']}")
+    print(f"max_configs_scanned: {summary['max_configs_scanned']}")
     print(f"status_counts: {summary['status_counts']}")
     print(f"journal_path: {summary['journal_path']}")
 
@@ -362,6 +409,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--registry", default="refined", help="refined, general, or a registry JSONL path.")
     parser.add_argument("--symbols", nargs="*", default=None)
     parser.add_argument("--max-signals", type=int, default=5)
+    parser.add_argument("--max-configs-scanned", type=int, default=None)
     parser.add_argument("--allow-watchlist-shadow", action="store_true")
     parser.add_argument("--notify-telegram", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
@@ -384,6 +432,7 @@ async def main() -> None:
         min_classification=args.min_classification,
         journal_path=args.journal_path,
         refresh_cache=args.refresh_cache,
+        max_configs_scanned=args.max_configs_scanned,
     )
     print_rows(rows, journal_path=args.journal_path)
 

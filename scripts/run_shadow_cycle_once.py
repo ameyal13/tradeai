@@ -89,6 +89,7 @@ async def run_shadow_cycle_once(
     registry: str = "refined",
     symbols: list[str] | None = None,
     max_signals: int = 5,
+    max_configs_scanned: int | None = None,
     allow_watchlist_shadow: bool = False,
     notify_telegram: bool = False,
     dry_run: bool = False,
@@ -102,9 +103,12 @@ async def run_shadow_cycle_once(
     output_dir = Path(reports_output_dir) if reports_output_dir else default_shadow_reports_dir()
     lock = Path(lock_path) if lock_path else default_lock_path()
     registry_path = registry_path_for_choice(registry)
+    effective_max_configs_scanned = int(max_configs_scanned) if max_configs_scanned is not None else int(max_signals)
     result: dict[str, Any] = {
         "started_at": utc_now(),
         "dry_run": bool(dry_run),
+        "max_signals": int(max_signals),
+        "max_configs_scanned": effective_max_configs_scanned,
         "journal_path": str(journal),
         "reports_output_dir": str(output_dir),
         "lock_path": str(lock),
@@ -137,7 +141,7 @@ async def run_shadow_cycle_once(
             min_classification=min_classification,
             journal_path=journal,
             refresh_cache=refresh_cache,
-            max_configs=max_signals,
+            max_configs_scanned=effective_max_configs_scanned,
         )
         summary = summarize_shadow_signals(
             journal_path=journal,
@@ -158,7 +162,7 @@ async def run_shadow_cycle_once(
                 min_classification=min_classification,
                 journal_path=journal,
                 refresh_cache=refresh_cache,
-                max_configs=max_signals,
+                max_configs_scanned=effective_max_configs_scanned,
             )
             summary = summarize_shadow_signals(
                 journal_path=journal,
@@ -167,7 +171,12 @@ async def run_shadow_cycle_once(
                 write_report=True,
             )
 
-    generation_summary = summarize_generation_rows(generated, journal_path=journal)
+    generation_summary = summarize_generation_rows(
+        generated,
+        journal_path=journal,
+        max_signals=int(max_signals),
+        max_configs_scanned=effective_max_configs_scanned,
+    )
     result.update({
         "finished_at": utc_now(),
         "evaluation": evaluation,
@@ -183,7 +192,9 @@ async def run_shadow_cycle_once(
             "Research only. No trading signal.\n\n"
             f"Evaluated closed: {evaluation.get('closed')}\n"
             f"Opened signals: {generation_summary.get('opened_signals')}\n"
+            f"Configs scanned: {generation_summary.get('configs_scanned')}\n"
             f"Skipped hold: {generation_summary.get('skipped_hold')}\n"
+            f"Skipped duplicate similar: {generation_summary.get('skipped_duplicate_similar')}\n"
             f"Open now: {(summary.get('summary') or {}).get('open')}\n"
             f"Closed total: {(summary.get('summary') or {}).get('closed')}\n"
             f"Markdown: {summary.get('markdown_path')}"
@@ -205,10 +216,14 @@ def print_cycle_result(result: dict[str, Any]) -> None:
     print(f"journal_path: {result.get('journal_path')}")
     print(f"evaluated_closed: {evaluation.get('closed')}")
     print(f"evaluation_errors: {len(evaluation.get('errors') or [])}")
+    print(f"configs_scanned: {generation.get('configs_scanned')}")
     print(f"opened_signals: {generation.get('opened_signals')}")
     print(f"skipped_hold: {generation.get('skipped_hold')}")
     print(f"skipped_duplicate_open: {generation.get('skipped_duplicate_open')}")
+    print(f"skipped_duplicate_similar: {generation.get('skipped_duplicate_similar')}")
     print(f"skipped_errors: {generation.get('skipped_errors')}")
+    print(f"max_signals: {generation.get('max_signals')}")
+    print(f"max_configs_scanned: {generation.get('max_configs_scanned')}")
     print(f"shadow_open: {shadow_summary.get('open')}")
     print(f"shadow_closed: {shadow_summary.get('closed')}")
     if result.get("summary_json_path"):
@@ -221,6 +236,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--registry", default="refined", help="refined, general, crypto_multi, or a registry JSONL path.")
     parser.add_argument("--symbols", nargs="*", default=None)
     parser.add_argument("--max-signals", type=int, default=5)
+    parser.add_argument("--max-configs-scanned", type=int, default=None)
     parser.add_argument("--allow-watchlist-shadow", action="store_true")
     parser.add_argument("--notify-telegram", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
@@ -239,6 +255,7 @@ async def main() -> None:
         registry=args.registry,
         symbols=args.symbols,
         max_signals=args.max_signals,
+        max_configs_scanned=args.max_configs_scanned,
         allow_watchlist_shadow=args.allow_watchlist_shadow,
         notify_telegram=args.notify_telegram,
         dry_run=args.dry_run,

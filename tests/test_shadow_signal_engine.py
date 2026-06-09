@@ -59,6 +59,14 @@ class FakeStrategySignal:
         }
 
 
+class DictStrategySignal:
+    def __init__(self, payload):
+        self.payload = payload
+
+    def to_dict(self):
+        return dict(self.payload)
+
+
 def registry_row(config_id="cfg1", classification="unstable_watchlist"):
     return {
         "config_id": config_id,
@@ -168,6 +176,100 @@ class ShadowSignalEngineTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(rows[0]["status"], "skipped_duplicate_open")
 
+    async def test_similar_open_signal_from_different_config_is_skipped(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            registry = Path(tmp) / "registry.jsonl"
+            journal = Path(tmp) / "shadow.jsonl"
+            write_registry(registry, [
+                registry_row(config_id="cfg1", classification="unstable_watchlist"),
+                registry_row(config_id="cfg2", classification="unstable_watchlist"),
+            ])
+            with patch("scripts.generate_shadow_signals_once.load_experiment_candles", new=AsyncMock(return_value={
+                "candles": sample_candles("2026-01-01", 300),
+            })):
+                with patch("scripts.generate_shadow_signals_once.generate_strategy_signal_from_df", return_value=FakeStrategySignal()):
+                    rows = await generate_shadow_signals_once(
+                        registry=str(registry),
+                        journal_path=journal,
+                        allow_watchlist_shadow=True,
+                        max_signals=2,
+                        max_configs_scanned=2,
+                        dry_run=True,
+                        refresh_cache=False,
+                    )
+
+        summary = summarize_generation_rows(rows, journal_path=journal)
+        self.assertEqual(rows[0]["status"], OPEN)
+        self.assertEqual(rows[1]["status"], "skipped_duplicate_open_similar")
+        self.assertEqual(rows[1]["duplicate_reason"], "same_symbol_timeframe_side_entry_stop_take_profit")
+        self.assertEqual(summary["opened_signals"], 1)
+        self.assertEqual(summary["skipped_duplicate_similar"], 1)
+        self.assertFalse(journal.exists())
+
+    async def test_distinct_side_or_levels_are_allowed(self):
+        buy = FakeStrategySignal(signal="BUY").to_dict()
+        sell = FakeStrategySignal(signal="SELL").to_dict()
+        sell["entry_price"] = 100.0
+        sell["stop_loss"] = 105.0
+        sell["take_profit"] = 90.0
+        with tempfile.TemporaryDirectory() as tmp:
+            registry = Path(tmp) / "registry.jsonl"
+            journal = Path(tmp) / "shadow.jsonl"
+            write_registry(registry, [
+                registry_row(config_id="cfg1", classification="unstable_watchlist"),
+                registry_row(config_id="cfg2", classification="unstable_watchlist"),
+            ])
+            with patch("scripts.generate_shadow_signals_once.load_experiment_candles", new=AsyncMock(return_value={
+                "candles": sample_candles("2026-01-01", 300),
+            })):
+                with patch(
+                    "scripts.generate_shadow_signals_once.generate_strategy_signal_from_df",
+                    side_effect=[DictStrategySignal(buy), DictStrategySignal(sell)],
+                ):
+                    rows = await generate_shadow_signals_once(
+                        registry=str(registry),
+                        journal_path=journal,
+                        allow_watchlist_shadow=True,
+                        max_signals=2,
+                        max_configs_scanned=2,
+                        dry_run=True,
+                        refresh_cache=False,
+                    )
+
+        self.assertEqual([row["status"] for row in rows], [OPEN, OPEN])
+        self.assertEqual(rows[0]["side"], "LONG")
+        self.assertEqual(rows[1]["side"], "SHORT")
+        self.assertFalse(journal.exists())
+
+    async def test_similar_duplicate_does_not_send_second_telegram(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            registry = Path(tmp) / "registry.jsonl"
+            journal = Path(tmp) / "shadow.jsonl"
+            write_registry(registry, [
+                registry_row(config_id="cfg1", classification="unstable_watchlist"),
+                registry_row(config_id="cfg2", classification="unstable_watchlist"),
+            ])
+            with patch("scripts.generate_shadow_signals_once.load_experiment_candles", new=AsyncMock(return_value={
+                "candles": sample_candles("2026-01-01", 300),
+            })):
+                with patch("scripts.generate_shadow_signals_once.generate_strategy_signal_from_df", return_value=FakeStrategySignal()):
+                    with patch("scripts.generate_shadow_signals_once.send_telegram_message") as send:
+                        rows = await generate_shadow_signals_once(
+                            registry=str(registry),
+                            journal_path=journal,
+                            allow_watchlist_shadow=True,
+                            max_signals=2,
+                            max_configs_scanned=2,
+                            dry_run=False,
+                            notify_telegram=True,
+                            refresh_cache=False,
+                        )
+            latest = ShadowSignalJournal(journal).list_signals(status=OPEN)
+
+        self.assertEqual([row["status"] for row in rows], [OPEN, "skipped_duplicate_open_similar"])
+        self.assertEqual(send.call_count, 1)
+        self.assertEqual(len(latest), 1)
+
     async def test_block_review_marks_signal_blocked(self):
         with tempfile.TemporaryDirectory() as tmp:
             registry = Path(tmp) / "registry.jsonl"
@@ -244,6 +346,63 @@ class ShadowSignalEngineTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["status"], "skipped_hold")
+
+    async def test_max_configs_scanned_can_scan_holds_and_open_one_signal(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            registry = Path(tmp) / "registry.jsonl"
+            journal = Path(tmp) / "shadow.jsonl"
+            write_registry(registry, [
+                registry_row(config_id=f"cfg{idx}", classification="unstable_watchlist")
+                for idx in range(8)
+            ])
+            signals = [FakeStrategySignal(signal="HOLD") for _ in range(7)] + [FakeStrategySignal(signal="BUY")]
+            with patch("scripts.generate_shadow_signals_once.load_experiment_candles", new=AsyncMock(return_value={
+                "candles": sample_candles("2026-01-01", 300),
+            })):
+                with patch("scripts.generate_shadow_signals_once.generate_strategy_signal_from_df", side_effect=signals):
+                    rows = await generate_shadow_signals_once(
+                        registry=str(registry),
+                        journal_path=journal,
+                        allow_watchlist_shadow=True,
+                        max_signals=1,
+                        max_configs_scanned=8,
+                        dry_run=True,
+                        refresh_cache=False,
+                    )
+
+        summary = summarize_generation_rows(rows, journal_path=journal, max_signals=1, max_configs_scanned=8)
+        self.assertEqual(len(rows), 8)
+        self.assertEqual(summary["configs_scanned"], 8)
+        self.assertEqual(summary["opened_signals"], 1)
+        self.assertEqual(summary["skipped_hold"], 7)
+        self.assertFalse(journal.exists())
+
+    async def test_does_not_open_more_than_max_signals_when_scanning_more_configs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            registry = Path(tmp) / "registry.jsonl"
+            journal = Path(tmp) / "shadow.jsonl"
+            write_registry(registry, [
+                registry_row(config_id=f"cfg{idx}", classification="unstable_watchlist")
+                for idx in range(3)
+            ])
+            with patch("scripts.generate_shadow_signals_once.load_experiment_candles", new=AsyncMock(return_value={
+                "candles": sample_candles("2026-01-01", 300),
+            })):
+                with patch("scripts.generate_shadow_signals_once.generate_strategy_signal_from_df", return_value=FakeStrategySignal(signal="BUY")):
+                    rows = await generate_shadow_signals_once(
+                        registry=str(registry),
+                        journal_path=journal,
+                        allow_watchlist_shadow=True,
+                        max_signals=1,
+                        max_configs_scanned=3,
+                        dry_run=True,
+                        refresh_cache=False,
+                    )
+
+        summary = summarize_generation_rows(rows, journal_path=journal, max_signals=1, max_configs_scanned=3)
+        self.assertEqual(summary["opened_signals"], 1)
+        self.assertEqual(summary["configs_scanned"], 1)
+        self.assertFalse(journal.exists())
 
     async def test_no_price_is_reported_separately(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -454,9 +613,18 @@ class ShadowSupportTests(unittest.TestCase):
         self.assertTrue(shadow["research_only"])
 
     def test_cli_parsers_accept_expected_flags(self):
-        args = build_generate_parser().parse_args(["--allow-watchlist-shadow", "--symbols", "SOL,ETH", "--max-signals", "2"])
+        args = build_generate_parser().parse_args([
+            "--allow-watchlist-shadow",
+            "--symbols",
+            "SOL,ETH",
+            "--max-signals",
+            "2",
+            "--max-configs-scanned",
+            "8",
+        ])
         self.assertTrue(args.allow_watchlist_shadow)
         self.assertEqual(args.max_signals, 2)
+        self.assertEqual(args.max_configs_scanned, 8)
 
         eval_args = build_evaluate_parser().parse_args(["--notify-telegram"])
         self.assertTrue(eval_args.notify_telegram)

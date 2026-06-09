@@ -23,6 +23,7 @@ OPEN = "OPEN"
 CLOSED = "CLOSED"
 EXPIRED = "EXPIRED"
 BLOCKED = "BLOCKED"
+DEFAULT_SIMILAR_PRICE_REL_TOL = 0.001
 
 
 def timeframe_to_minutes(timeframe: str) -> int:
@@ -53,6 +54,39 @@ def _json_default(value: Any) -> str:
     if isinstance(value, datetime):
         return value.isoformat()
     return str(value)
+
+
+def _float_or_none(value: Any) -> float | None:
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    return numeric
+
+
+def _prices_very_similar(left: Any, right: Any, rel_tol: float = DEFAULT_SIMILAR_PRICE_REL_TOL) -> bool:
+    left_num = _float_or_none(left)
+    right_num = _float_or_none(right)
+    if left_num is None or right_num is None:
+        return False
+    scale = max(abs(left_num), abs(right_num), 1e-12)
+    return abs(left_num - right_num) <= abs(float(rel_tol)) * scale
+
+
+def shadow_signals_are_similar(
+    left: dict[str, Any],
+    right: dict[str, Any],
+    rel_tol: float = DEFAULT_SIMILAR_PRICE_REL_TOL,
+) -> bool:
+    """Return True when two open shadow signals represent the same exposure."""
+    return (
+        str(left.get("symbol", "")).upper() == str(right.get("symbol", "")).upper()
+        and str(left.get("timeframe", "")) == str(right.get("timeframe", ""))
+        and str(left.get("side", "")).upper() == str(right.get("side", "")).upper()
+        and _prices_very_similar(left.get("entry_price"), right.get("entry_price"), rel_tol=rel_tol)
+        and _prices_very_similar(left.get("stop_loss"), right.get("stop_loss"), rel_tol=rel_tol)
+        and _prices_very_similar(left.get("take_profit"), right.get("take_profit"), rel_tol=rel_tol)
+    )
 
 
 class ShadowSignalJournal:
@@ -96,6 +130,16 @@ class ShadowSignalJournal:
             if row.get("config_id") == config_id and row.get("symbol") == symbol.upper() and row.get("timeframe") == timeframe:
                 return True
         return False
+
+    def find_open_similar_signal(
+        self,
+        signal: dict[str, Any],
+        rel_tol: float = DEFAULT_SIMILAR_PRICE_REL_TOL,
+    ) -> dict[str, Any] | None:
+        for row in self.list_signals(status=OPEN):
+            if shadow_signals_are_similar(row, signal, rel_tol=rel_tol):
+                return row
+        return None
 
     def create_signal(self, payload: dict[str, Any]) -> dict[str, Any]:
         row = dict(payload)
