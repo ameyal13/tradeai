@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, patch
 
 from scripts.run_shadow_cycle_once import (
     ShadowCycleLocked,
+    build_parser as build_shadow_cycle_parser,
     default_journal_path,
     default_shadow_reports_dir,
     registry_path_for_choice,
@@ -134,6 +135,38 @@ class ShadowCycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(output.exists())
         self.assertFalse(lock.exists())
 
+    async def test_cycle_passes_max_configs_scanned_separately_from_max_signals(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch("scripts.run_shadow_cycle_once.generate_shadow_signals_once", new=AsyncMock(return_value=[{"status": "skipped_hold", "config_id": "cfg1"}])) as generate:
+                result = await run_shadow_cycle_once(
+                    registry=str(Path(tmp) / "registry.jsonl"),
+                    journal_path=Path(tmp) / "journal.jsonl",
+                    reports_output_dir=Path(tmp) / "reports",
+                    lock_path=Path(tmp) / "cycle.lock",
+                    dry_run=True,
+                    max_signals=1,
+                    max_configs_scanned=8,
+                )
+
+        self.assertEqual(generate.call_args.kwargs["max_signals"], 1)
+        self.assertEqual(generate.call_args.kwargs["max_configs_scanned"], 8)
+        self.assertEqual(result["max_signals"], 1)
+        self.assertEqual(result["max_configs_scanned"], 8)
+
+    async def test_cycle_defaults_max_configs_scanned_to_max_signals(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch("scripts.run_shadow_cycle_once.generate_shadow_signals_once", new=AsyncMock(return_value=[])) as generate:
+                await run_shadow_cycle_once(
+                    registry=str(Path(tmp) / "registry.jsonl"),
+                    journal_path=Path(tmp) / "journal.jsonl",
+                    reports_output_dir=Path(tmp) / "reports",
+                    lock_path=Path(tmp) / "cycle.lock",
+                    dry_run=True,
+                    max_signals=2,
+                )
+
+        self.assertEqual(generate.call_args.kwargs["max_configs_scanned"], 2)
+
 
 class ShadowSummaryTests(unittest.TestCase):
     def test_summary_calculates_profit_factor(self):
@@ -207,6 +240,12 @@ class ShadowSummaryTests(unittest.TestCase):
                 self.assertEqual(default_journal_path(), data / "shadow_signal_journal.jsonl")
                 self.assertEqual(default_shadow_reports_dir(), reports / "shadow")
                 self.assertEqual(registry_path_for_choice("refined"), str(reports / "research_daemon" / "refined_registry.jsonl"))
+
+    def test_shadow_cycle_cli_accepts_max_configs_scanned(self):
+        args = build_shadow_cycle_parser().parse_args(["--max-signals", "1", "--max-configs-scanned", "8"])
+
+        self.assertEqual(args.max_signals, 1)
+        self.assertEqual(args.max_configs_scanned, 8)
 
 
 class _noop_async_context:
