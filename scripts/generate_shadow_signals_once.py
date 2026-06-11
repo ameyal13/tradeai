@@ -17,6 +17,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from research.asset_universe import normalize_crypto_symbols  # noqa: E402
+from research.news_context_engine import build_news_context  # noqa: E402
 from research.signal_review_agent import SignalReviewRequest, review_shadow_signal  # noqa: E402
 from research.telegram_notifier import format_shadow_signal_opened, send_telegram_message  # noqa: E402
 from scripts.run_historical_experiments import load_experiment_candles  # noqa: E402
@@ -30,6 +31,7 @@ from tools.shadow_signal_journal import (  # noqa: E402
     horizon_minutes_from_candles,
     shadow_signals_are_similar,
 )
+from tools.runtime_env import load_project_env  # noqa: E402
 from tools.strategy_signals import generate_strategy_signal_from_df  # noqa: E402
 
 
@@ -151,6 +153,7 @@ async def generate_shadow_signals_once(
     refresh_cache: bool = True,
     max_configs: int | None = None,
     max_configs_scanned: int | None = None,
+    use_news_context: bool = False,
 ) -> list[dict[str, Any]]:
     registry_path = registry_path_from_choice(registry)
     journal = None if dry_run else ShadowSignalJournal(journal_path)
@@ -276,6 +279,10 @@ async def generate_shadow_signals_once(
                     "take_profit": shadow.get("take_profit"),
                 })
                 continue
+            news_context = None
+            if use_news_context:
+                news_context = (await build_news_context(symbol)).model_dump()
+                shadow["news_context"] = news_context
             review = review_shadow_signal(SignalReviewRequest(
                 symbol=symbol,
                 timeframe=timeframe,
@@ -285,6 +292,7 @@ async def generate_shadow_signals_once(
                 take_profit=shadow.get("take_profit"),
                 confidence=float(shadow.get("confidence") or 0),
                 reasoning=str(shadow.get("notes") or ""),
+                news_context=news_context,
             ))
             shadow["agent_review"] = review.model_dump()
             if review.review_status == "BLOCK":
@@ -417,10 +425,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--journal-path", default=str(DEFAULT_SHADOW_JOURNAL_PATH))
     parser.add_argument("--refresh-cache", action="store_true", default=True)
     parser.add_argument("--no-refresh-cache", action="store_false", dest="refresh_cache")
+    parser.add_argument("--use-news-context", action="store_true", help="Fetch structured news context for bounded agent review.")
     return parser
 
 
 async def main() -> None:
+    load_project_env()
     args = build_parser().parse_args()
     rows = await generate_shadow_signals_once(
         registry=args.registry,
@@ -433,6 +443,7 @@ async def main() -> None:
         journal_path=args.journal_path,
         refresh_cache=args.refresh_cache,
         max_configs_scanned=args.max_configs_scanned,
+        use_news_context=args.use_news_context,
     )
     print_rows(rows, journal_path=args.journal_path)
 

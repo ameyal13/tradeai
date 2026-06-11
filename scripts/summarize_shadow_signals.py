@@ -21,6 +21,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from research.telegram_notifier import format_shadow_daily_summary, send_telegram_message  # noqa: E402
+from tools.runtime_env import load_project_env  # noqa: E402
 
 
 def utc_now() -> str:
@@ -213,6 +214,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
+    load_project_env()
     args = build_parser().parse_args()
     report = summarize_shadow_signals(
         journal_path=args.journal_path,

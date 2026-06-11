@@ -67,6 +67,14 @@ class DictStrategySignal:
         return dict(self.payload)
 
 
+class FakeNewsContext:
+    def __init__(self, payload):
+        self.payload = payload
+
+    def model_dump(self):
+        return dict(self.payload)
+
+
 def registry_row(config_id="cfg1", classification="unstable_watchlist"):
     return {
         "config_id": config_id,
@@ -291,6 +299,41 @@ class ShadowSignalEngineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(rows[0]["status"], "skipped_agent_block")
         self.assertEqual(rows[0]["journal_status"], "BLOCKED")
         self.assertIn("BLOCKED", rows[0]["notes"])
+
+    async def test_news_context_is_passed_to_agent_review_when_enabled(self):
+        news_payload = {
+            "symbol": "SOL",
+            "risk_score": 50,
+            "sentiment_score": -0.4,
+            "item_count": 2,
+            "risk_flags": ["negative_symbol_news"],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            registry = Path(tmp) / "registry.jsonl"
+            journal = Path(tmp) / "shadow.jsonl"
+            write_registry(registry, [registry_row(classification="unstable_watchlist")])
+            with patch("scripts.generate_shadow_signals_once.load_experiment_candles", new=AsyncMock(return_value={
+                "candles": sample_candles("2026-01-01", 300),
+            })):
+                with patch("scripts.generate_shadow_signals_once.generate_strategy_signal_from_df", return_value=FakeStrategySignal()):
+                    with patch(
+                        "scripts.generate_shadow_signals_once.build_news_context",
+                        new=AsyncMock(return_value=FakeNewsContext(news_payload)),
+                    ) as news:
+                        rows = await generate_shadow_signals_once(
+                            registry=str(registry),
+                            journal_path=journal,
+                            allow_watchlist_shadow=True,
+                            max_signals=1,
+                            dry_run=True,
+                            refresh_cache=False,
+                            use_news_context=True,
+                        )
+
+        news.assert_awaited_once_with("SOL")
+        self.assertEqual(rows[0]["status"], OPEN)
+        self.assertEqual(rows[0]["agent_review"]["review_status"], "CAUTION")
+        self.assertEqual(rows[0]["news_context"]["risk_flags"], ["negative_symbol_news"])
 
     async def test_hold_signal_reports_explicit_hold_reason(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -557,6 +600,31 @@ class ShadowSupportTests(unittest.TestCase):
         self.assertFalse(hasattr(response, "entry_price"))
         self.assertEqual(response.review_status, "APPROVE")
 
+    def test_agent_review_can_block_high_risk_news_without_modifying_trade(self):
+        request = SignalReviewRequest(
+            symbol="SOL",
+            timeframe="1h",
+            side="LONG",
+            entry_price=100,
+            stop_loss=95,
+            take_profit=110,
+            confidence=60,
+            news_context={
+                "risk_score": 95,
+                "sentiment_score": -0.8,
+                "item_count": 3,
+                "risk_flags": ["negative_symbol_news", "news_hack"],
+            },
+        )
+
+        response = review_shadow_signal(request)
+
+        self.assertEqual(response.review_status, "BLOCK")
+        self.assertEqual(response.confidence_adjustment, -10)
+        self.assertFalse(response.can_modify_trade_levels)
+        self.assertFalse(hasattr(response, "entry_price"))
+        self.assertIn("negative_symbol_news", response.risk_flags)
+
     def test_crypto_universe_has_no_equities(self):
         universe = crypto_universe()
 
@@ -621,10 +689,12 @@ class ShadowSupportTests(unittest.TestCase):
             "2",
             "--max-configs-scanned",
             "8",
+            "--use-news-context",
         ])
         self.assertTrue(args.allow_watchlist_shadow)
         self.assertEqual(args.max_signals, 2)
         self.assertEqual(args.max_configs_scanned, 8)
+        self.assertTrue(args.use_news_context)
 
         eval_args = build_evaluate_parser().parse_args(["--notify-telegram"])
         self.assertTrue(eval_args.notify_telegram)

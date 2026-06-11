@@ -242,10 +242,17 @@ class ShadowSummaryTests(unittest.TestCase):
                 self.assertEqual(registry_path_for_choice("refined"), str(reports / "research_daemon" / "refined_registry.jsonl"))
 
     def test_shadow_cycle_cli_accepts_max_configs_scanned(self):
-        args = build_shadow_cycle_parser().parse_args(["--max-signals", "1", "--max-configs-scanned", "8"])
+        args = build_shadow_cycle_parser().parse_args([
+            "--max-signals",
+            "1",
+            "--max-configs-scanned",
+            "8",
+            "--use-news-context",
+        ])
 
         self.assertEqual(args.max_signals, 1)
         self.assertEqual(args.max_configs_scanned, 8)
+        self.assertTrue(args.use_news_context)
 
 
 class _noop_async_context:

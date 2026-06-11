@@ -7,7 +7,7 @@ neutral APPROVE review without contacting any LLM.
 from __future__ import annotations
 
 import os
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -25,6 +25,8 @@ class SignalReviewRequest(BaseModel):
     confidence: float
     reasoning: str = ""
     research_only: bool = True
+    news_context: dict[str, Any] | None = None
+    market_context: dict[str, Any] | None = None
 
 
 class SignalReviewResponse(BaseModel):
@@ -39,10 +41,47 @@ class SignalReviewResponse(BaseModel):
 
 
 def review_shadow_signal(request: SignalReviewRequest) -> SignalReviewResponse:
-    """Return a bounded review stub unless an agent provider is configured."""
+    """Return a bounded review.
+
+    The review layer is allowed to caution/block based on structured context,
+    but it never modifies side, entry, stop loss, take profit, or RR.
+    """
+    context_risk_flags: list[str] = []
+    context_summary = "No external context review was performed."
+    news_context = request.news_context or {}
+    if news_context:
+        risk_score = float(news_context.get("risk_score") or 0)
+        context_risk_flags = [str(flag) for flag in news_context.get("risk_flags", [])]
+        sentiment_score = news_context.get("sentiment_score")
+        context_summary = (
+            f"News context checked: risk_score={risk_score}, "
+            f"sentiment_score={sentiment_score}, items={news_context.get('item_count', 0)}."
+        )
+        if risk_score >= 80:
+            return SignalReviewResponse(
+                review_status="BLOCK",
+                confidence_adjustment=-10,
+                risk_flags=context_risk_flags or ["high_news_risk"],
+                context_summary=context_summary,
+                reasoning="Structured news context indicates high event risk; shadow signal is blocked for research safety.",
+            )
+        if risk_score >= 45 or context_risk_flags:
+            return SignalReviewResponse(
+                review_status="CAUTION",
+                confidence_adjustment=-5,
+                risk_flags=context_risk_flags or ["elevated_news_risk"],
+                context_summary=context_summary,
+                reasoning="Structured news context indicates elevated risk; trade levels are unchanged.",
+            )
+
     provider = os.getenv("AGENT_PROVIDER")
     model = os.getenv("AGENT_MODEL")
     if not provider or provider.lower() in {"none", "disabled"}:
+        if news_context:
+            return SignalReviewResponse(
+                context_summary=context_summary,
+                reasoning="Structured news context did not trigger caution/block; no LLM provider was used.",
+            )
         return SignalReviewResponse()
     return SignalReviewResponse(
         review_status="CAUTION",
