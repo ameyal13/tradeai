@@ -1,7 +1,9 @@
 import tempfile
 import unittest
+import asyncio
+import json
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pandas as pd
 
@@ -12,6 +14,7 @@ from research.shadow_replay import (
     save_shadow_replay_report,
 )
 from scripts.run_shadow_replay_audit import build_parser
+from scripts.run_shadow_replay_audit import run_shadow_replay_audit
 
 
 class FakeSignal:
@@ -174,6 +177,78 @@ class ShadowReplayTests(unittest.TestCase):
         self.assertEqual(args.registry, "crypto_multi")
         self.assertEqual(args.max_signals, 1)
         self.assertFalse(args.use_sentiment)
+        self.assertTrue(args.progress)
+        self.assertFalse(args.quiet)
+
+    def test_progress_callback_receives_cycle_updates(self):
+        updates = []
+        with patch("research.shadow_replay.generate_strategy_signal_from_df", return_value=hold_signal()):
+            report = run_shadow_replay_for_candles(
+                candles=candles(10),
+                configs=[config()],
+                symbol="ADA",
+                timeframe="1h",
+                days=1,
+                max_signals=1,
+                max_configs_scanned=1,
+                min_history_candles=5,
+                max_cycles=2,
+                progress_callback=updates.append,
+            )
+
+        self.assertEqual(report["cycles"], 2)
+        self.assertEqual(len(updates), 2)
+        self.assertIn("summary", updates[-1])
+        self.assertIn("event_status_counts", updates[-1])
+
+    def test_max_runtime_stops_replay_cleanly(self):
+        report = run_shadow_replay_for_candles(
+            candles=candles(10),
+            configs=[config()],
+            symbol="ADA",
+            timeframe="1h",
+            days=1,
+            max_signals=1,
+            max_configs_scanned=1,
+            min_history_candles=5,
+            max_cycles=2,
+            max_runtime_seconds=0,
+        )
+
+        self.assertEqual(report["stop_reason"], "max_runtime_seconds")
+        self.assertEqual(report["cycles"], 0)
+
+    def test_status_file_is_written_by_audit_runner(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            status_path = Path(tmp) / "status.json"
+            with patch("scripts.run_shadow_replay_audit.load_shadow_replay_configs", return_value=[config()]), \
+                    patch("scripts.run_shadow_replay_audit.load_experiment_candles", new=AsyncMock(return_value={
+                        "candles": candles(10),
+                        "data_source": "test",
+                        "data_cache_path": None,
+                        "data_warning": None,
+                    })), \
+                    patch("research.shadow_replay.generate_strategy_signal_from_df", return_value=hold_signal()):
+                report = asyncio.run(run_shadow_replay_audit(
+                    registry="crypto_multi",
+                    symbols=["ADA"],
+                    timeframe="1h",
+                    days=1,
+                    max_candles=10,
+                    max_signals=1,
+                    max_configs_scanned=1,
+                    min_history_candles=5,
+                    max_cycles=1,
+                    output_dir=tmp,
+                    write_report=False,
+                    quiet=True,
+                    status_path=status_path,
+                ))
+
+            status = json.loads(status_path.read_text(encoding="utf-8"))
+            self.assertTrue(status["completed"])
+            self.assertEqual(status["symbols"], ["ADA"])
+            self.assertEqual(report["combined"]["summary"]["total"], 0)
 
 
 if __name__ == "__main__":

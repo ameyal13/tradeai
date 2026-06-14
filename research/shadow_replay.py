@@ -7,10 +7,11 @@ orders.
 from __future__ import annotations
 
 import json
+import time
 from collections import Counter, defaultdict
 from datetime import timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from uuid import uuid4
 
 import pandas as pd
@@ -171,6 +172,8 @@ def run_shadow_replay_for_candles(
     min_history_candles: int = 300,
     use_sentiment: bool = False,
     max_cycles: int | None = None,
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
+    max_runtime_seconds: int | None = None,
 ) -> dict[str, Any]:
     """Replay current shadow policy on one symbol/timeframe candle set."""
     df = _normalize_candles(candles)
@@ -191,12 +194,36 @@ def run_shadow_replay_for_candles(
     open_signals: list[dict[str, Any]] = []
     skipped_because_open = 0
     cycles_with_generation_attempt = 0
+    completed_cycles = 0
+    stop_reason: str | None = None
+    started_monotonic = time.monotonic()
+
+    def emit_progress(cycle_number: int, now: pd.Timestamp) -> None:
+        if progress_callback is None:
+            return
+        progress_callback({
+            "symbol": symbol.upper(),
+            "timeframe": timeframe,
+            "cycle": cycle_number,
+            "total_cycles": len(cycle_indices),
+            "timestamp": now.isoformat(),
+            "elapsed_seconds": round(time.monotonic() - started_monotonic, 3),
+            "open_count": len(open_signals),
+            "summary": _prediction_metrics(signals + open_signals),
+            "event_status_counts": _status_counts(events),
+            "last_event_status": events[-1].get("status") if events else None,
+            "stop_reason": stop_reason,
+        })
 
     for cycle_number, idx in enumerate(cycle_indices, start=1):
+        if max_runtime_seconds is not None and time.monotonic() - started_monotonic >= max_runtime_seconds:
+            stop_reason = "max_runtime_seconds"
+            break
         now = pd.Timestamp(df.loc[idx, "timestamp"])
         candles_until_now = df.iloc[: idx + 1].copy()
         open_signals, newly_closed = _evaluate_open_signals(open_signals, candles_until_now, now)
         signals.extend(newly_closed)
+        completed_cycles = cycle_number
         if open_signals:
             skipped_because_open += 1
             events.append({
@@ -205,8 +232,10 @@ def run_shadow_replay_for_candles(
                 "status": "skipped_open_exists",
                 "open_count": len(open_signals),
             })
+            emit_progress(cycle_number, now)
             continue
         if max_signals <= 0:
+            emit_progress(cycle_number, now)
             continue
         cycles_with_generation_attempt += 1
         opened_this_cycle: list[dict[str, Any]] = []
@@ -261,7 +290,9 @@ def run_shadow_replay_for_candles(
                     "error_message": str(exc)[:180],
                 })
         if opened_this_cycle:
+            emit_progress(cycle_number, now)
             continue
+        emit_progress(cycle_number, now)
 
     if cycle_indices:
         final_index = cycle_indices[-1]
@@ -278,7 +309,9 @@ def run_shadow_replay_for_candles(
         "days": days,
         "rows": len(df),
         "start_index": start_index,
-        "cycles": len(cycle_indices),
+        "cycles": completed_cycles,
+        "planned_cycles": len(cycle_indices),
+        "stop_reason": stop_reason,
         "cycle_step_candles": cycle_step_candles,
         "min_history_candles": min_history_candles,
         "max_signals": max_signals,
