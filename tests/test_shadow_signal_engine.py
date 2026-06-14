@@ -22,6 +22,7 @@ from scripts.generate_shadow_signals_once import (
     generate_shadow_signals_once,
     load_candidate_configs,
     print_rows,
+    registry_path_from_choice,
     summarize_generation_rows,
 )
 from scripts.evaluate_shadow_signals_once import build_parser as build_evaluate_parser
@@ -68,6 +69,14 @@ class DictStrategySignal:
 
 
 class FakeNewsContext:
+    def __init__(self, payload):
+        self.payload = payload
+
+    def model_dump(self):
+        return dict(self.payload)
+
+
+class FakeMarketContext:
     def __init__(self, payload):
         self.payload = payload
 
@@ -334,6 +343,43 @@ class ShadowSignalEngineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(rows[0]["status"], OPEN)
         self.assertEqual(rows[0]["agent_review"]["review_status"], "CAUTION")
         self.assertEqual(rows[0]["news_context"]["risk_flags"], ["negative_symbol_news"])
+
+    async def test_market_context_is_passed_to_agent_review_when_enabled(self):
+        market_payload = {
+            "context_status": "BLOCK",
+            "confidence_adjustment": -10,
+            "risk_flags": ["long_against_local_trend", "long_near_resistance"],
+            "context_summary": "market context test",
+            "metrics": {"trend": "bearish"},
+            "can_modify_trade_levels": False,
+            "research_only": True,
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            registry = Path(tmp) / "registry.jsonl"
+            journal = Path(tmp) / "shadow.jsonl"
+            write_registry(registry, [registry_row(classification="unstable_watchlist")])
+            with patch("scripts.generate_shadow_signals_once.load_experiment_candles", new=AsyncMock(return_value={
+                "candles": sample_candles("2026-01-01", 300),
+            })):
+                with patch("scripts.generate_shadow_signals_once.generate_strategy_signal_from_df", return_value=FakeStrategySignal()):
+                    with patch(
+                        "scripts.generate_shadow_signals_once.build_market_context",
+                        return_value=FakeMarketContext(market_payload),
+                    ) as market:
+                        rows = await generate_shadow_signals_once(
+                            registry=str(registry),
+                            journal_path=journal,
+                            allow_watchlist_shadow=True,
+                            max_signals=1,
+                            dry_run=True,
+                            refresh_cache=False,
+                            use_market_context=True,
+                        )
+
+        market.assert_called_once()
+        self.assertEqual(rows[0]["status"], "skipped_agent_block")
+        self.assertEqual(rows[0]["market_context"]["context_status"], "BLOCK")
+        self.assertFalse(rows[0]["agent_review"]["can_modify_trade_levels"])
 
     async def test_hold_signal_reports_explicit_hold_reason(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -690,14 +736,21 @@ class ShadowSupportTests(unittest.TestCase):
             "--max-configs-scanned",
             "8",
             "--use-news-context",
+            "--use-market-context",
         ])
         self.assertTrue(args.allow_watchlist_shadow)
         self.assertEqual(args.max_signals, 2)
         self.assertEqual(args.max_configs_scanned, 8)
         self.assertTrue(args.use_news_context)
+        self.assertTrue(args.use_market_context)
 
         eval_args = build_evaluate_parser().parse_args(["--notify-telegram"])
         self.assertTrue(eval_args.notify_telegram)
+
+    def test_registry_choice_accepts_crypto_multi(self):
+        path = registry_path_from_choice("crypto_multi")
+
+        self.assertEqual(path.name, "crypto_multi_registry.jsonl")
 
     def test_classify_signal_skip_hold_and_invalid_levels(self):
         hold = FakeStrategySignal(signal="HOLD").to_dict()

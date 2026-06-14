@@ -100,6 +100,7 @@ async def run_shadow_cycle_once(
     reports_output_dir: str | Path | None = None,
     lock_path: str | Path | None = None,
     use_news_context: bool = False,
+    use_market_context: bool = False,
 ) -> dict[str, Any]:
     journal = Path(journal_path) if journal_path else default_journal_path()
     output_dir = Path(reports_output_dir) if reports_output_dir else default_shadow_reports_dir()
@@ -117,6 +118,7 @@ async def run_shadow_cycle_once(
         "registry": registry,
         "registry_path": registry_path,
         "use_news_context": bool(use_news_context),
+        "use_market_context": bool(use_market_context),
         "guardrails": {
             "research_only": True,
             "no_real_trading": True,
@@ -146,6 +148,7 @@ async def run_shadow_cycle_once(
             refresh_cache=refresh_cache,
             max_configs_scanned=effective_max_configs_scanned,
             use_news_context=use_news_context,
+            use_market_context=use_market_context,
         )
         summary = summarize_shadow_signals(
             journal_path=journal,
@@ -168,6 +171,7 @@ async def run_shadow_cycle_once(
                 refresh_cache=refresh_cache,
                 max_configs_scanned=effective_max_configs_scanned,
                 use_news_context=use_news_context,
+                use_market_context=use_market_context,
             )
             summary = summarize_shadow_signals(
                 journal_path=journal,
@@ -219,6 +223,7 @@ def print_cycle_result(result: dict[str, Any]) -> None:
     print(f"dry_run: {result.get('dry_run')}")
     print(f"registry_path: {result.get('registry_path')}")
     print(f"use_news_context: {result.get('use_news_context')}")
+    print(f"use_market_context: {result.get('use_market_context')}")
     print(f"journal_path: {result.get('journal_path')}")
     print(f"evaluated_closed: {evaluation.get('closed')}")
     print(f"evaluation_errors: {len(evaluation.get('errors') or [])}")
@@ -253,6 +258,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--reports-output-dir", default=None)
     parser.add_argument("--lock-path", default=None)
     parser.add_argument("--use-news-context", action="store_true", help="Use structured news context in bounded shadow review.")
+    parser.add_argument("--use-market-context", action="store_true", help="Use deterministic technical market context in bounded shadow review.")
     return parser
 
 
@@ -273,6 +279,7 @@ async def main() -> None:
         reports_output_dir=args.reports_output_dir,
         lock_path=args.lock_path,
         use_news_context=args.use_news_context,
+        use_market_context=args.use_market_context,
     )
     print_cycle_result(result)
 

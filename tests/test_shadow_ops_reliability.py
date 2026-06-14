@@ -266,6 +266,32 @@ class ShadowOpsCycleTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(cycle.await_args.kwargs["use_news_context"])
 
+    async def test_run_shadow_ops_propagates_market_context(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            journal_path = Path(tmp) / "shadow.jsonl"
+            with patch("scripts.run_shadow_ops_once.build_healthcheck_report", new=AsyncMock(return_value={
+                "health_status": "HEALTH_OK",
+                "shadow_journal": {"open": 0},
+            })):
+                with patch("scripts.run_shadow_ops_once.evaluate_shadow_signals_once", new=AsyncMock(return_value={
+                    "found_open": 0,
+                    "closed": 0,
+                    "still_open": 0,
+                    "errors": [],
+                    "closed_signals": [],
+                })):
+                    with patch("scripts.run_shadow_ops_once.run_shadow_cycle_once", new=AsyncMock(return_value={
+                        "generation_summary": {"opened_signals": 0, "configs_scanned": 1},
+                    })) as cycle:
+                        await run_shadow_ops_once(
+                            journal_path=journal_path,
+                            reports_output_dir=Path(tmp) / "reports",
+                            use_market_context=True,
+                            dry_run=True,
+                        )
+
+        self.assertTrue(cycle.await_args.kwargs["use_market_context"])
+
     async def test_dry_run_does_not_write_journal(self):
         with tempfile.TemporaryDirectory() as tmp:
             journal_path = Path(tmp) / "shadow.jsonl"

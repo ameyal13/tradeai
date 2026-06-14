@@ -49,6 +49,7 @@ def review_shadow_signal(request: SignalReviewRequest) -> SignalReviewResponse:
     context_risk_flags: list[str] = []
     context_summary = "No external context review was performed."
     news_context = request.news_context or {}
+    market_context = request.market_context or {}
     if news_context:
         risk_score = float(news_context.get("risk_score") or 0)
         context_risk_flags = [str(flag) for flag in news_context.get("risk_flags", [])]
@@ -74,13 +75,34 @@ def review_shadow_signal(request: SignalReviewRequest) -> SignalReviewResponse:
                 reasoning="Structured news context indicates elevated risk; trade levels are unchanged.",
             )
 
+    if market_context:
+        market_status = str(market_context.get("context_status") or "APPROVE").upper()
+        market_flags = [str(flag) for flag in market_context.get("risk_flags", [])]
+        context_summary = str(market_context.get("context_summary") or "Market context checked.")
+        if market_status == "BLOCK":
+            return SignalReviewResponse(
+                review_status="BLOCK",
+                confidence_adjustment=-10,
+                risk_flags=market_flags or ["market_context_block"],
+                context_summary=context_summary,
+                reasoning="Structured market context indicates stacked technical risk; shadow signal is blocked for research safety.",
+            )
+        if market_status == "CAUTION" or market_flags:
+            return SignalReviewResponse(
+                review_status="CAUTION",
+                confidence_adjustment=-5,
+                risk_flags=market_flags or ["market_context_caution"],
+                context_summary=context_summary,
+                reasoning="Structured market context indicates elevated technical risk; trade levels are unchanged.",
+            )
+
     provider = os.getenv("AGENT_PROVIDER")
     model = os.getenv("AGENT_MODEL")
     if not provider or provider.lower() in {"none", "disabled"}:
-        if news_context:
+        if news_context or market_context:
             return SignalReviewResponse(
                 context_summary=context_summary,
-                reasoning="Structured news context did not trigger caution/block; no LLM provider was used.",
+                reasoning="Structured context did not trigger caution/block; no LLM provider was used.",
             )
         return SignalReviewResponse()
     return SignalReviewResponse(

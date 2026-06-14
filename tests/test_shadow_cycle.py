@@ -248,11 +248,13 @@ class ShadowSummaryTests(unittest.TestCase):
             "--max-configs-scanned",
             "8",
             "--use-news-context",
+            "--use-market-context",
         ])
 
         self.assertEqual(args.max_signals, 1)
         self.assertEqual(args.max_configs_scanned, 8)
         self.assertTrue(args.use_news_context)
+        self.assertTrue(args.use_market_context)
 
 
 class _noop_async_context:

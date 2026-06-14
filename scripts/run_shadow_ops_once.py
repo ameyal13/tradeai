@@ -33,6 +33,7 @@ async def run_shadow_ops_once(
     max_signals: int = 1,
     max_configs_scanned: int = 21,
     use_news_context: bool = False,
+    use_market_context: bool = False,
     refresh_cache: bool = True,
     journal_path: str | Path | None = None,
     reports_output_dir: str | Path | None = None,
@@ -79,6 +80,7 @@ async def run_shadow_ops_once(
             journal_path=journal,
             reports_output_dir=output_dir,
             use_news_context=use_news_context,
+            use_market_context=use_market_context,
         )
 
     final_summary = summarize_shadow_signals(
@@ -96,6 +98,7 @@ async def run_shadow_ops_once(
         },
         "dry_run": bool(dry_run),
         "use_news_context": bool(use_news_context),
+        "use_market_context": bool(use_market_context),
         "health_before": health_before,
         "evaluation": evaluation,
         "summary_before_generation": first_summary.get("summary"),
@@ -130,6 +133,7 @@ def print_ops_result(result: dict[str, Any]) -> None:
     print("Research only. No trading signal.")
     print(f"dry_run: {result.get('dry_run')}")
     print(f"use_news_context: {result.get('use_news_context')}")
+    print(f"use_market_context: {result.get('use_market_context')}")
     print(f"health_status: {(result.get('health_before') or {}).get('health_status')}")
     print(f"evaluated_closed: {(result.get('evaluation') or {}).get('closed')}")
     print(f"evaluation_errors: {len((result.get('evaluation') or {}).get('errors') or [])}")
@@ -154,6 +158,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-signals", type=int, default=1)
     parser.add_argument("--max-configs-scanned", type=int, default=21)
     parser.add_argument("--use-news-context", action="store_true")
+    parser.add_argument("--use-market-context", action="store_true")
     parser.add_argument("--refresh-cache", action="store_true", default=True)
     parser.add_argument("--no-refresh-cache", action="store_false", dest="refresh_cache")
     parser.add_argument("--journal-path", default=None)
@@ -172,6 +177,7 @@ async def main() -> None:
         max_signals=args.max_signals,
         max_configs_scanned=args.max_configs_scanned,
         use_news_context=args.use_news_context,
+        use_market_context=args.use_market_context,
         refresh_cache=args.refresh_cache,
         journal_path=args.journal_path,
         reports_output_dir=args.reports_output_dir,
