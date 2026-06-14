@@ -15,11 +15,12 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Código de la app
 COPY . .
 
-# Puerto que expone Render
+# Puerto que expone Railway/Render. Railway injects PORT at runtime.
+ENV PORT=8000
 EXPOSE 8000
 
-# Health check para Render
+# Health check para Railway/Render
 HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
-    CMD python -c "import httpx; httpx.get('http://localhost:8000/health').raise_for_status()"
+    CMD python -c "import os, httpx; httpx.get(f'http://localhost:{os.getenv(\"PORT\", \"8000\")}/health').raise_for_status()"
 
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
+CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000} --workers 1"]

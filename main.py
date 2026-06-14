@@ -207,7 +207,7 @@ async def health():
 @app.get("/shadow/health")
 async def shadow_health():
     """Read-only shadow/paper trading health for dashboards."""
-    report = shadow_signal_repo.summary(prefer_supabase=False)
+    report = shadow_signal_repo.summary(prefer_supabase=True)
     return {
         "status": "ok",
         "research_only": True,
