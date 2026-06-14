@@ -82,3 +82,73 @@ with check (
     and (prediction_journal.user_id is null or auth.uid() = prediction_journal.user_id)
   )
 );
+
+-- Shadow/Paper signal storage for research dashboards.
+-- Backend service-role API writes/reads these tables; do not expose service role
+-- keys to the frontend. RLS is enabled and no public anon policy is created here.
+
+create table if not exists shadow_signals (
+  shadow_signal_id text primary key,
+  config_id text null,
+  source_registry text null,
+  classification text null check (classification is null or classification in ('stable_research_candidate', 'unstable_watchlist', 'manual')),
+  symbol text not null,
+  timeframe text not null,
+  strategy_mode text null,
+  side text null check (side is null or side in ('LONG', 'SHORT')),
+  entry_price numeric null,
+  stop_loss numeric null,
+  take_profit numeric null,
+  risk_reward numeric null,
+  horizon_candles integer null,
+  horizon_minutes integer null,
+  confidence numeric null,
+  generated_at timestamptz null,
+  expires_at timestamptz null,
+  status text not null check (status in ('OPEN', 'CLOSED', 'EXPIRED', 'BLOCKED')),
+  outcome text null check (outcome is null or outcome in ('WIN', 'LOSS', 'BREAKEVEN', 'EXPIRED', 'INVALID')),
+  exit_price numeric null,
+  exit_reason text null,
+  pnl_pct numeric null,
+  pnl_amount numeric null,
+  commission_pct numeric null,
+  slippage_pct numeric null,
+  spread_pct numeric null,
+  mfe_pct numeric null,
+  mae_pct numeric null,
+  notes text null,
+  input_features jsonb not null default '{}'::jsonb,
+  agent_review jsonb not null default '{}'::jsonb,
+  news_context jsonb not null default '{}'::jsonb,
+  market_context jsonb not null default '{}'::jsonb,
+  model_provider text null,
+  model_name text null,
+  research_only boolean not null default true,
+  watchlist_shadow boolean not null default false,
+  updated_at timestamptz not null default now(),
+  raw jsonb not null default '{}'::jsonb
+);
+
+create index if not exists shadow_signals_symbol_timeframe_idx
+on shadow_signals(symbol, timeframe, generated_at desc);
+
+create index if not exists shadow_signals_status_idx
+on shadow_signals(status, generated_at desc);
+
+create table if not exists shadow_signal_events (
+  id uuid primary key default gen_random_uuid(),
+  shadow_signal_id text not null references shadow_signals(shadow_signal_id) on delete cascade,
+  event_sequence integer not null,
+  event_type text not null,
+  status text null,
+  outcome text null,
+  recorded_at timestamptz not null default now(),
+  payload jsonb not null default '{}'::jsonb,
+  unique (shadow_signal_id, event_sequence)
+);
+
+create index if not exists shadow_signal_events_signal_idx
+on shadow_signal_events(shadow_signal_id, event_sequence);
+
+alter table shadow_signals enable row level security;
+alter table shadow_signal_events enable row level security;

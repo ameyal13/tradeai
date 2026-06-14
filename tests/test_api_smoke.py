@@ -8,6 +8,8 @@ import numpy as np
 import pandas as pd
 
 from tools.prediction_journal import PredictionStore
+from tools.shadow_signal_journal import ShadowSignalJournal
+from tools.shadow_signal_repository import ShadowSignalRepository
 
 
 def candles(rows=140):
@@ -39,6 +41,7 @@ class ApiSmokeTests(unittest.TestCase):
         cls.tmp = tempfile.TemporaryDirectory()
         main.supabase = None
         main.prediction_store = PredictionStore(file_path=Path(cls.tmp.name) / "journal.json")
+        main.shadow_signal_repo = ShadowSignalRepository(journal_path=Path(cls.tmp.name) / "shadow.jsonl")
         cls.main = main
         cls.client = TestClient(main.app)
 
@@ -129,6 +132,42 @@ class ApiSmokeTests(unittest.TestCase):
         })
         self.assertEqual(response.status_code, 200)
         self.assertIn("predictions", response.json()["data"])
+
+    def test_shadow_read_only_endpoints_use_local_fallback(self):
+        journal_path = Path(self.tmp.name) / "shadow.jsonl"
+        journal = ShadowSignalJournal(journal_path)
+        journal.append({
+            "shadow_signal_id": "sig-smoke",
+            "config_id": "cfg-smoke",
+            "source_registry": "crypto_multi_registry",
+            "classification": "unstable_watchlist",
+            "symbol": "ADA",
+            "timeframe": "1h",
+            "strategy_mode": "xgboost",
+            "side": "LONG",
+            "entry_price": 1.0,
+            "stop_loss": 0.95,
+            "take_profit": 1.1,
+            "risk_reward": 2.0,
+            "horizon_candles": 12,
+            "horizon_minutes": 720,
+            "confidence": 60.0,
+            "generated_at": "2026-01-01T00:00:00+00:00",
+            "expires_at": "2026-01-01T12:00:00+00:00",
+            "status": "OPEN",
+            "research_only": True,
+        })
+
+        health = self.client.get("/shadow/health")
+        signals = self.client.get("/shadow/signals?status=OPEN&symbol=ADA")
+        summary = self.client.get("/shadow/summary")
+
+        self.assertEqual(health.status_code, 200)
+        self.assertEqual(signals.status_code, 200)
+        self.assertEqual(summary.status_code, 200)
+        self.assertTrue(health.json()["research_only"])
+        self.assertEqual(signals.json()["count"], 1)
+        self.assertEqual(summary.json()["data"]["summary"]["open"], 1)
 
     def test_optimizer_run_with_manual_candles(self):
         response = self.client.post("/optimizer/run", json={

@@ -40,6 +40,8 @@ from tools.prediction_journal import (
     prediction_payload_from_signal_response,
     utc_now,
 )
+from tools.shadow_signal_journal import DEFAULT_SHADOW_JOURNAL_PATH
+from tools.shadow_signal_repository import ShadowSignalRepository
 from tools.strategy_optimizer import run_walk_forward_optimizer
 from agents.trading_agent import build_agent, generate_trading_signal
 from langchain_core.messages import HumanMessage
@@ -70,6 +72,7 @@ if os.getenv("SUPABASE_URL") and os.getenv("SUPABASE_SERVICE_ROLE_KEY"):
     except Exception:
         supabase = None
 prediction_store = PredictionStore(supabase)
+shadow_signal_repo = ShadowSignalRepository(supabase_client=supabase, journal_path=DEFAULT_SHADOW_JOURNAL_PATH)
 
 # ── WebSocket connections manager ──────────────────────────────────────────
 class ConnectionManager:
@@ -201,6 +204,58 @@ async def health():
 
 
 # ── Market endpoints ───────────────────────────────────────────────────────
+@app.get("/shadow/health")
+async def shadow_health():
+    """Read-only shadow/paper trading health for dashboards."""
+    report = shadow_signal_repo.summary(prefer_supabase=False)
+    return {
+        "status": "ok",
+        "research_only": True,
+        "no_real_trading": True,
+        "no_exchange_orders": True,
+        "source": report.get("source", "local_jsonl"),
+        "journal_path": str(DEFAULT_SHADOW_JOURNAL_PATH),
+        "supabase_available": supabase is not None,
+        "summary": report.get("summary") or {},
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+@app.get("/shadow/signals")
+async def list_shadow_signals(
+    status: Optional[str] = None,
+    symbol: Optional[str] = None,
+    limit: int = 100,
+):
+    """Read-only latest shadow signals. Falls back to local JSONL."""
+    safe_limit = max(1, min(int(limit), 500))
+    rows = shadow_signal_repo.list_signals(status=status, symbol=symbol, limit=safe_limit)
+    return {
+        "data": rows,
+        "count": len(rows),
+        "research_only": True,
+        "no_real_trading": True,
+        "source": "supabase" if supabase is not None else "local_jsonl",
+    }
+
+
+@app.get("/shadow/summary")
+async def shadow_summary():
+    """Read-only shadow signal summary for dashboards."""
+    report = shadow_signal_repo.summary(prefer_supabase=True)
+    return {
+        "data": {
+            "summary": report.get("summary"),
+            "by_symbol": report.get("by_symbol"),
+            "by_config": report.get("by_config"),
+            "by_timeframe": report.get("by_timeframe"),
+        },
+        "source": report.get("source", "local_jsonl"),
+        "research_only": True,
+        "no_real_trading": True,
+    }
+
+
 @app.get("/market/overview")
 async def market_overview():
     """Top 10 cryptos con precios actuales."""
