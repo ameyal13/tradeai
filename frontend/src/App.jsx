@@ -65,7 +65,7 @@ export default function App() {
   return (
     <Routes>
       <Route element={<Layout />}>
-        <Route index element={<DashboardPage />} />
+        <Route index element={<ShadowSignalsPage />} />
         <Route path="chart" element={<PlaceholderPage title="Graficas" description="Ruta reservada para mercado y velas." />} />
         <Route path="signals" element={<ShadowSignalsPage />} />
         <Route path="news" element={<PlaceholderPage title="Noticias" description="Ruta reservada para contexto y fuentes cacheadas." />} />
