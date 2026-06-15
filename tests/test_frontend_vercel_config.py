@@ -37,3 +37,5 @@ def test_shadow_dashboard_exposes_monitoring_panels():
     assert "Data freshness" in page_source
     assert "Latest signal context" in page_source
     assert "Top configs" in page_source
+    assert "Config performance" in page_source
+    assert "fewer than 30 closed shadow signals" in page_source

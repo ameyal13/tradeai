@@ -30,6 +30,11 @@ function shortId(value) {
   return value ? String(value).slice(0, 8) : '-'
 }
 
+function toNumber(value, fallback = 0) {
+  const numeric = Number(value)
+  return Number.isFinite(numeric) ? numeric : fallback
+}
+
 function statusClass(status) {
   if (status === 'OPEN') return 'badge-medium'
   if (status === 'CLOSED') return 'badge-low'
@@ -184,6 +189,58 @@ function SignalContextPanel({ signal }) {
   )
 }
 
+function buildConfigRows(signals, byConfig) {
+  const grouped = new Map()
+  for (const signal of signals) {
+    const configId = signal.config_id || 'unknown'
+    if (!grouped.has(configId)) {
+      grouped.set(configId, [])
+    }
+    grouped.get(configId).push(signal)
+  }
+
+  return Array.from(grouped.entries()).map(([configId, rows]) => {
+    const summary = byConfig?.[configId] || {}
+    const latest = [...rows].sort((a, b) => String(b.updated_at || b.recorded_at || b.generated_at || '').localeCompare(String(a.updated_at || a.recorded_at || a.generated_at || '')))[0] || {}
+    const longCount = rows.filter((row) => row.side === 'LONG').length
+    const shortCount = rows.filter((row) => row.side === 'SHORT').length
+    const closed = toNumber(summary.closed)
+    const wins = toNumber(summary.wins)
+    const losses = toNumber(summary.losses)
+    const avgConfidence = rows.reduce((acc, row) => acc + toNumber(row.confidence), 0) / Math.max(rows.length, 1)
+    return {
+      configId,
+      summary,
+      latest,
+      symbol: latest.symbol || '-',
+      timeframe: latest.timeframe || '-',
+      classification: latest.classification || '-',
+      modelName: latest.model_name || latest.input_features?.model_name || '-',
+      total: toNumber(summary.total, rows.length),
+      open: toNumber(summary.open),
+      closed,
+      wins,
+      losses,
+      winRate: toNumber(summary.win_rate),
+      profitFactor: summary.profit_factor,
+      avgReturn: toNumber(summary.avg_return),
+      drawdown: toNumber(summary.max_drawdown),
+      longCount,
+      shortCount,
+      avgConfidence,
+      horizon: latest.horizon_candles || '-',
+      horizonMinutes: latest.horizon_minutes || '-',
+      riskReward: latest.risk_reward,
+      lastUpdated: latest.updated_at || latest.recorded_at || latest.generated_at,
+    }
+  }).sort((a, b) => {
+    const pfA = a.profitFactor === null || a.profitFactor === undefined ? -Infinity : Number(a.profitFactor)
+    const pfB = b.profitFactor === null || b.profitFactor === undefined ? -Infinity : Number(b.profitFactor)
+    if (pfA !== pfB) return pfB - pfA
+    return b.avgReturn - a.avgReturn
+  })
+}
+
 function SymbolSummary({ bySymbol }) {
   const rows = Object.entries(bySymbol || {})
   return (
@@ -266,6 +323,94 @@ function ConfigSummary({ byConfig }) {
   )
 }
 
+function ConfigDeepDive({ configRows, selectedConfig, onSelectConfig }) {
+  const selected = configRows.find((row) => row.configId === selectedConfig) || configRows[0]
+  const sampleWarning = selected && selected.closed < 30
+  return (
+    <section className="card">
+      <div className="section-head">
+        <h2 className="panel-title">Config performance</h2>
+        <select
+          value={selected?.configId || ''}
+          onChange={(event) => onSelectConfig(event.target.value)}
+          disabled={configRows.length === 0}
+        >
+          {configRows.length === 0 && <option value="">No configs</option>}
+          {configRows.map((row) => (
+            <option key={row.configId} value={row.configId}>
+              {shortId(row.configId)} | {row.symbol} {row.timeframe}
+            </option>
+          ))}
+        </select>
+      </div>
+
+      {configRows.length === 0 ? (
+        <div className="text-muted">No config performance available yet.</div>
+      ) : (
+        <>
+          <div className="config-detail-grid">
+            <StatLine label="Selected config" value={shortId(selected.configId)} />
+            <StatLine label="Symbol/timeframe" value={`${selected.symbol} ${selected.timeframe}`} />
+            <StatLine label="Closed sample" value={selected.closed} tone={sampleWarning ? 'warn' : 'neutral'} />
+            <StatLine label="Wins / losses" value={`${selected.wins} / ${selected.losses}`} />
+            <StatLine label="Profit factor" value={formatNumber(selected.profitFactor, 4)} tone={Number(selected.profitFactor) > 1 ? 'good' : 'warn'} />
+            <StatLine label="Avg return" value={formatPct(selected.avgReturn, 4)} tone={selected.avgReturn > 0 ? 'good' : selected.avgReturn < 0 ? 'bad' : 'neutral'} />
+            <StatLine label="Drawdown" value={formatPct(selected.drawdown)} tone={selected.drawdown > 10 ? 'bad' : 'neutral'} />
+            <StatLine label="Direction mix" value={`LONG ${selected.longCount} / SHORT ${selected.shortCount}`} />
+            <StatLine label="Avg confidence" value={formatPct(selected.avgConfidence)} />
+            <StatLine label="Horizon" value={`${selected.horizon} candles / ${selected.horizonMinutes} min`} />
+            <StatLine label="Risk reward" value={formatNumber(selected.riskReward, 2)} />
+            <StatLine label="Last update" value={formatDate(selected.lastUpdated)} />
+          </div>
+          {sampleWarning && (
+            <div className="sample-warning">
+              This config has fewer than 30 closed shadow signals. Treat the result as early evidence, not a deployable edge.
+            </div>
+          )}
+          <div style={{ overflowX: 'auto', marginTop: 14 }}>
+            <table className="data-table">
+              <thead>
+                <tr>
+                  <th>Config</th>
+                  <th>Symbol</th>
+                  <th>Closed</th>
+                  <th>Open</th>
+                  <th>W/L</th>
+                  <th>PF</th>
+                  <th>Avg</th>
+                  <th>DD</th>
+                  <th>Direction</th>
+                  <th>Updated</th>
+                </tr>
+              </thead>
+              <tbody>
+                {configRows.map((row) => (
+                  <tr
+                    key={row.configId}
+                    className={row.configId === selected?.configId ? 'selected-row' : ''}
+                    onClick={() => onSelectConfig(row.configId)}
+                  >
+                    <td className="mono">{shortId(row.configId)}</td>
+                    <td className="mono">{row.symbol} {row.timeframe}</td>
+                    <td>{row.closed}</td>
+                    <td>{row.open}</td>
+                    <td>{row.wins}/{row.losses}</td>
+                    <td>{formatNumber(row.profitFactor, 4)}</td>
+                    <td className={row.avgReturn >= 0 ? 'text-green' : 'text-red'}>{formatPct(row.avgReturn, 4)}</td>
+                    <td>{formatPct(row.drawdown)}</td>
+                    <td>LONG {row.longCount} / SHORT {row.shortCount}</td>
+                    <td className="mono">{formatDate(row.lastUpdated)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
+    </section>
+  )
+}
+
 function SignalsTable({ signals }) {
   return (
     <section className="card">
@@ -328,6 +473,7 @@ function SignalsTable({ signals }) {
 
 export default function ShadowSignalsPage() {
   const [state, setState] = useState({ loading: true, error: '', health: null, summary: null, signals: [] })
+  const [selectedConfig, setSelectedConfig] = useState('')
 
   async function load() {
     setState((current) => ({ ...current, loading: true, error: '' }))
@@ -367,6 +513,17 @@ export default function ShadowSignalsPage() {
   }, [state.signals])
   const latestOpen = useMemo(() => sortedSignals.filter((item) => item.status === 'OPEN'), [sortedSignals])
   const latestSignal = sortedSignals[0] || null
+  const configRows = useMemo(() => buildConfigRows(sortedSignals, state.summary?.by_config || {}), [sortedSignals, state.summary])
+
+  useEffect(() => {
+    if (configRows.length === 0) {
+      setSelectedConfig('')
+      return
+    }
+    if (!configRows.some((row) => row.configId === selectedConfig)) {
+      setSelectedConfig(configRows[0].configId)
+    }
+  }, [configRows, selectedConfig])
 
   return (
     <>
@@ -421,6 +578,12 @@ export default function ShadowSignalsPage() {
             <SymbolSummary bySymbol={state.summary?.by_symbol || {}} />
             <ConfigSummary byConfig={state.summary?.by_config || {}} />
           </div>
+
+          <ConfigDeepDive
+            configRows={configRows}
+            selectedConfig={selectedConfig}
+            onSelectConfig={setSelectedConfig}
+          />
 
           <div className="shadow-grid">
             <section className="card">
