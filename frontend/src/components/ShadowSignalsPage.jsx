@@ -241,6 +241,44 @@ function buildConfigRows(signals, byConfig) {
   })
 }
 
+function summarizeBucket(rows) {
+  const closed = rows.filter((row) => row.status === 'CLOSED' || row.status === 'EXPIRED')
+  const wins = closed.filter((row) => row.outcome === 'WIN')
+  const losses = closed.filter((row) => row.outcome === 'LOSS')
+  const returns = closed.map((row) => toNumber(row.pnl_pct))
+  const profits = returns.filter((value) => value > 0).reduce((acc, value) => acc + value, 0)
+  const lossSum = Math.abs(returns.filter((value) => value < 0).reduce((acc, value) => acc + value, 0))
+  return {
+    total: rows.length,
+    closed: closed.length,
+    wins: wins.length,
+    losses: losses.length,
+    winRate: closed.length ? wins.length / closed.length * 100 : 0,
+    avgReturn: closed.length ? returns.reduce((acc, value) => acc + value, 0) / closed.length : 0,
+    profitFactor: lossSum > 0 ? profits / lossSum : null,
+  }
+}
+
+function buildConfidenceBuckets(signals) {
+  const buckets = [
+    { label: '<50%', min: -Infinity, max: 50, rows: [] },
+    { label: '50-60%', min: 50, max: 60, rows: [] },
+    { label: '60-70%', min: 60, max: 70, rows: [] },
+    { label: '70-80%', min: 70, max: 80, rows: [] },
+    { label: '80%+', min: 80, max: Infinity, rows: [] },
+  ]
+  for (const signal of signals) {
+    const confidence = toNumber(signal.confidence, NaN)
+    if (!Number.isFinite(confidence)) continue
+    const bucket = buckets.find((item) => confidence >= item.min && confidence < item.max)
+    if (bucket) bucket.rows.push(signal)
+  }
+  return buckets.map((bucket) => ({
+    label: bucket.label,
+    ...summarizeBucket(bucket.rows),
+  }))
+}
+
 function SymbolSummary({ bySymbol }) {
   const rows = Object.entries(bySymbol || {})
   return (
@@ -411,6 +449,45 @@ function ConfigDeepDive({ configRows, selectedConfig, onSelectConfig }) {
   )
 }
 
+function ConfidenceBuckets({ buckets }) {
+  const usefulBuckets = buckets.filter((bucket) => bucket.total > 0)
+  const best = usefulBuckets.reduce((winner, bucket) => {
+    if (!winner) return bucket
+    return bucket.avgReturn > winner.avgReturn ? bucket : winner
+  }, null)
+  return (
+    <section className="card">
+      <div className="section-head">
+        <h2 className="panel-title">Confidence vs outcome</h2>
+        <span className="text-muted mono" style={{ fontSize: 11 }}>diagnostic only</span>
+      </div>
+      {usefulBuckets.length === 0 ? (
+        <div className="text-muted">No confidence data available yet.</div>
+      ) : (
+        <>
+          <div className="bucket-grid">
+            {buckets.map((bucket) => {
+              const isBest = best && bucket.label === best.label && bucket.closed > 0
+              return (
+                <div className={`bucket-card ${isBest ? 'bucket-best' : ''}`} key={bucket.label}>
+                  <div className="mono bucket-label">{bucket.label}</div>
+                  <StatLine label="Closed" value={bucket.closed} />
+                  <StatLine label="Win rate" value={formatPct(bucket.winRate)} />
+                  <StatLine label="Avg return" value={formatPct(bucket.avgReturn, 4)} tone={bucket.avgReturn > 0 ? 'good' : bucket.avgReturn < 0 ? 'bad' : 'neutral'} />
+                  <StatLine label="PF" value={formatNumber(bucket.profitFactor, 4)} tone={Number(bucket.profitFactor) > 1 ? 'good' : 'warn'} />
+                </div>
+              )
+            })}
+          </div>
+          <div className="sample-warning">
+            Confidence is useful only if higher buckets keep improving after many closed signals. Do not raise or lower thresholds from this view alone.
+          </div>
+        </>
+      )}
+    </section>
+  )
+}
+
 function SignalsTable({ signals }) {
   return (
     <section className="card">
@@ -514,6 +591,7 @@ export default function ShadowSignalsPage() {
   const latestOpen = useMemo(() => sortedSignals.filter((item) => item.status === 'OPEN'), [sortedSignals])
   const latestSignal = sortedSignals[0] || null
   const configRows = useMemo(() => buildConfigRows(sortedSignals, state.summary?.by_config || {}), [sortedSignals, state.summary])
+  const confidenceBuckets = useMemo(() => buildConfidenceBuckets(sortedSignals), [sortedSignals])
 
   useEffect(() => {
     if (configRows.length === 0) {
@@ -584,6 +662,8 @@ export default function ShadowSignalsPage() {
             selectedConfig={selectedConfig}
             onSelectConfig={setSelectedConfig}
           />
+
+          <ConfidenceBuckets buckets={confidenceBuckets} />
 
           <div className="shadow-grid">
             <section className="card">

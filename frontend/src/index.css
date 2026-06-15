@@ -264,6 +264,29 @@ select option { background: var(--bg3); }
   font-size: 13px;
 }
 
+.bucket-grid {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.bucket-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: rgba(26,31,38,0.45);
+  padding: 12px;
+}
+
+.bucket-best {
+  border-color: rgba(0,212,160,0.34);
+  background: rgba(0,212,160,0.06);
+}
+
+.bucket-label {
+  color: var(--text);
+  margin-bottom: 10px;
+}
+
 .selected-row td {
   background: rgba(0,212,160,0.06);
 }
@@ -308,6 +331,7 @@ select option { background: var(--bg3); }
   .shadow-grid { grid-template-columns: 1fr; }
   .ops-grid { grid-template-columns: 1fr; }
   .config-detail-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .bucket-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .active-main { flex-direction: column; }
   .active-levels { width: 100%; }
 }
@@ -316,4 +340,5 @@ select option { background: var(--bg3); }
   .kpi-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .section-head { align-items: stretch; flex-direction: column; }
   .config-detail-grid { grid-template-columns: 1fr; }
+  .bucket-grid { grid-template-columns: 1fr; }
 }
