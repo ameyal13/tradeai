@@ -26,6 +26,17 @@ export const api = {
       request('/signals/generate', { method: 'POST', body: JSON.stringify({ symbol, interval, provider }) }),
     list:       (symbol, limit = 20)      => request(`/signals${symbol ? `?symbol=${symbol}&limit=${limit}` : `?limit=${limit}`}`),
   },
+  shadow: {
+    health:     ()                        => request('/shadow/health'),
+    summary:    ()                        => request('/shadow/summary'),
+    signals:    ({ status = '', symbol = '', limit = 50 } = {}) => {
+      const params = new URLSearchParams()
+      if (status) params.set('status', status)
+      if (symbol) params.set('symbol', symbol)
+      params.set('limit', String(limit))
+      return request(`/shadow/signals?${params.toString()}`)
+    },
+  },
   backtest: {
     run:        (payload)                 => request('/backtest/run', { method: 'POST', body: JSON.stringify(payload) }),
     get:        (id)                      => request(`/backtest/${id}`),

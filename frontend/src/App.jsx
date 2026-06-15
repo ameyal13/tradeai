@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Navigate, Route, Routes } from 'react-router-dom'
 import Layout from './components/Layout.jsx'
+import ShadowSignalsPage from './components/ShadowSignalsPage.jsx'
 import { api } from './lib/api.js'
 
 function PageHeader({ title, description }) {
@@ -66,7 +67,7 @@ export default function App() {
       <Route element={<Layout />}>
         <Route index element={<DashboardPage />} />
         <Route path="chart" element={<PlaceholderPage title="Graficas" description="Ruta reservada para mercado y velas." />} />
-        <Route path="signals" element={<PlaceholderPage title="Senales" description="Ruta reservada para senales medibles y journal." />} />
+        <Route path="signals" element={<ShadowSignalsPage />} />
         <Route path="news" element={<PlaceholderPage title="Noticias" description="Ruta reservada para contexto y fuentes cacheadas." />} />
         <Route path="backtest" element={<PlaceholderPage title="Backtest" description="Ruta reservada para probar Backtest Engine V2." />} />
         <Route path="*" element={<Navigate to="/" replace />} />
