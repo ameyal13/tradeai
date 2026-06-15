@@ -28,3 +28,12 @@ def test_frontend_reads_vite_api_url():
 
     assert "import.meta.env.VITE_API_URL" in api_source
     assert ".replace(/\\/+$/, '')" in api_source
+
+
+def test_shadow_dashboard_exposes_monitoring_panels():
+    page_source = (ROOT / "frontend" / "src" / "components" / "ShadowSignalsPage.jsx").read_text(encoding="utf-8")
+
+    assert "Active shadow signal" in page_source
+    assert "Data freshness" in page_source
+    assert "Latest signal context" in page_source
+    assert "Top configs" in page_source

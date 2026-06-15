@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Activity, AlertTriangle, RefreshCw, ShieldCheck } from 'lucide-react'
+import { Activity, AlertTriangle, Clock, Database, RefreshCw, ShieldCheck, TrendingUp } from 'lucide-react'
 import { api } from '../lib/api.js'
 
 function formatNumber(value, digits = 2) {
@@ -10,6 +10,20 @@ function formatNumber(value, digits = 2) {
 function formatPct(value, digits = 2) {
   if (value === null || value === undefined || Number.isNaN(Number(value))) return '-'
   return `${formatNumber(value, digits)}%`
+}
+
+function formatDate(value) {
+  if (!value) return '-'
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return '-'
+  return date.toLocaleString()
+}
+
+function minutesUntil(value) {
+  if (!value) return null
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return null
+  return Math.round((date.getTime() - Date.now()) / 60000)
 }
 
 function shortId(value) {
@@ -41,6 +55,16 @@ function Kpi({ label, value, tone = 'neutral' }) {
   )
 }
 
+function StatLine({ label, value, tone = 'neutral' }) {
+  const className = tone === 'good' ? 'text-green' : tone === 'bad' ? 'text-red' : tone === 'warn' ? 'text-amber' : ''
+  return (
+    <div className="stat-line">
+      <span className="text-muted">{label}</span>
+      <span className={`mono ${className}`}>{value}</span>
+    </div>
+  )
+}
+
 function GuardrailStrip({ health }) {
   return (
     <section
@@ -65,7 +89,97 @@ function GuardrailStrip({ health }) {
           </div>
         </div>
       </div>
-      <div className="mono text-muted" style={{ fontSize: 11 }}>{health?.timestamp ? new Date(health.timestamp).toLocaleString() : '-'}</div>
+      <div className="mono text-muted" style={{ fontSize: 11 }}>{formatDate(health?.timestamp)}</div>
+    </section>
+  )
+}
+
+function FreshnessPanel({ health, summary, signals }) {
+  const newest = signals[0] || {}
+  const latestUpdated = newest.updated_at || newest.recorded_at || newest.generated_at || health?.timestamp
+  const source = summary?.source || health?.source || '-'
+  return (
+    <section className="card">
+      <h2 className="panel-title"><Database size={15} /> Data freshness</h2>
+      <div className="stack">
+        <StatLine label="Source" value={source} />
+        <StatLine label="Last backend check" value={formatDate(health?.timestamp)} />
+        <StatLine label="Last signal update" value={formatDate(latestUpdated)} />
+        <StatLine label="Supabase" value={health?.supabase_available ? 'available' : 'not configured'} tone={health?.supabase_available ? 'good' : 'warn'} />
+      </div>
+    </section>
+  )
+}
+
+function ActiveSignalPanel({ signal }) {
+  if (!signal) {
+    return (
+      <section className="card">
+        <h2 className="panel-title"><Clock size={15} /> Active shadow signal</h2>
+        <div className="text-muted">No OPEN shadow signal right now.</div>
+      </section>
+    )
+  }
+  const remaining = minutesUntil(signal.expires_at)
+  const remainingLabel = remaining === null ? '-' : remaining >= 0 ? `${remaining} min` : `${Math.abs(remaining)} min overdue`
+  return (
+    <section className="card active-signal">
+      <div className="active-signal-head">
+        <h2 className="panel-title"><Clock size={15} /> Active shadow signal</h2>
+        <span className="badge badge-medium">OPEN</span>
+      </div>
+      <div className="active-main">
+        <div>
+          <div className="mono active-symbol">{signal.symbol} {signal.timeframe}</div>
+          <div style={{ marginTop: 8 }}>
+            <span className={`badge ${signal.side === 'LONG' ? 'badge-buy' : 'badge-sell'}`}>{signal.side || '-'}</span>
+          </div>
+        </div>
+        <div className="active-levels">
+          <StatLine label="Entry" value={formatNumber(signal.entry_price, 6)} />
+          <StatLine label="Stop loss" value={formatNumber(signal.stop_loss, 6)} tone="bad" />
+          <StatLine label="Take profit" value={formatNumber(signal.take_profit, 6)} tone="good" />
+          <StatLine label="Expires in" value={remainingLabel} tone={remaining !== null && remaining < 0 ? 'warn' : 'neutral'} />
+        </div>
+      </div>
+      <div className="active-meta">
+        <span>RR {formatNumber(signal.risk_reward, 2)}</span>
+        <span>Confidence {formatPct(signal.confidence)}</span>
+        <span>Horizon {signal.horizon_candles || '-'} candles / {signal.horizon_minutes || '-'} min</span>
+        <span>Config {shortId(signal.config_id)}</span>
+      </div>
+    </section>
+  )
+}
+
+function SignalContextPanel({ signal }) {
+  const features = signal?.input_features || signal?.raw?.input_features || {}
+  const review = signal?.agent_review || signal?.raw?.agent_review || {}
+  const news = signal?.news_context || signal?.raw?.news_context || {}
+  const market = signal?.market_context || signal?.raw?.market_context || {}
+  const riskFlags = Array.isArray(review.risk_flags) ? review.risk_flags : []
+  return (
+    <section className="card">
+      <h2 className="panel-title"><TrendingUp size={15} /> Latest signal context</h2>
+      {!signal ? (
+        <div className="text-muted">No signal context available yet.</div>
+      ) : (
+        <div className="stack">
+          <StatLine label="Latest signal" value={`${signal.symbol || '-'} ${signal.side || '-'} ${signal.status || '-'}`} />
+          <StatLine label="Model" value={signal.model_name || features.model_name || '-'} />
+          <StatLine label="Buy probability" value={formatPct(features.probability_buy_win, 2)} />
+          <StatLine label="Sell probability" value={formatPct(features.probability_sell_win, 2)} />
+          <StatLine label="Agent review" value={review.review_status || '-'} tone={review.review_status === 'BLOCK' ? 'bad' : review.review_status === 'CAUTION' ? 'warn' : 'neutral'} />
+          <StatLine label="News context" value={news.context_status || news.provider_status || news.sentiment || '-'} />
+          <StatLine label="Market context" value={market.context_status || market.review_status || '-'} />
+          <div>
+            <div className="text-muted" style={{ marginBottom: 6 }}>Risk flags</div>
+            <div className="tag-row">
+              {riskFlags.length ? riskFlags.slice(0, 4).map((flag) => <span className="tag" key={flag}>{flag}</span>) : <span className="text-muted">None recorded</span>}
+            </div>
+          </div>
+        </div>
+      )}
     </section>
   )
 }
@@ -113,6 +227,45 @@ function SymbolSummary({ bySymbol }) {
   )
 }
 
+function ConfigSummary({ byConfig }) {
+  const rows = Object.entries(byConfig || {})
+    .sort(([, a], [, b]) => Number(b.closed || 0) - Number(a.closed || 0))
+    .slice(0, 8)
+  return (
+    <section className="card">
+      <h2 className="panel-title">Top configs</h2>
+      {rows.length === 0 ? (
+        <div className="text-muted">No config data yet.</div>
+      ) : (
+        <div style={{ overflowX: 'auto' }}>
+          <table className="data-table compact-table">
+            <thead>
+              <tr>
+                <th>Config</th>
+                <th>Total</th>
+                <th>Win Rate</th>
+                <th>PF</th>
+                <th>Avg Return</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map(([config, item]) => (
+                <tr key={config}>
+                  <td className="mono">{shortId(config)}</td>
+                  <td>{item.total}</td>
+                  <td>{formatPct(item.win_rate)}</td>
+                  <td>{formatNumber(item.profit_factor, 4)}</td>
+                  <td className={Number(item.avg_return) >= 0 ? 'text-green' : 'text-red'}>{formatPct(item.avg_return, 4)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
+  )
+}
+
 function SignalsTable({ signals }) {
   return (
     <section className="card">
@@ -136,6 +289,9 @@ function SignalsTable({ signals }) {
                 <th>SL</th>
                 <th>TP</th>
                 <th>PnL</th>
+                <th>Expires</th>
+                <th>Confidence</th>
+                <th>Horizon</th>
                 <th>Review</th>
                 <th>Config</th>
               </tr>
@@ -145,7 +301,7 @@ function SignalsTable({ signals }) {
                 const review = signal.agent_review || {}
                 return (
                   <tr key={signal.shadow_signal_id}>
-                    <td className="mono">{signal.generated_at ? new Date(signal.generated_at).toLocaleString() : '-'}</td>
+                    <td className="mono">{formatDate(signal.generated_at)}</td>
                     <td className="mono">{signal.symbol}</td>
                     <td><span className={`badge ${signal.side === 'LONG' ? 'badge-buy' : 'badge-sell'}`}>{signal.side || '-'}</span></td>
                     <td><span className={`badge ${statusClass(signal.status)}`}>{signal.status}</span></td>
@@ -154,6 +310,9 @@ function SignalsTable({ signals }) {
                     <td>{formatNumber(signal.stop_loss, 6)}</td>
                     <td>{formatNumber(signal.take_profit, 6)}</td>
                     <td className={Number(signal.pnl_pct) >= 0 ? 'text-green' : 'text-red'}>{formatPct(signal.pnl_pct, 4)}</td>
+                    <td className="mono">{formatDate(signal.expires_at)}</td>
+                    <td>{formatPct(signal.confidence)}</td>
+                    <td>{signal.horizon_candles || '-'}c / {signal.horizon_minutes || '-'}m</td>
                     <td>{review.review_status || '-'}</td>
                     <td className="mono">{shortId(signal.config_id)}</td>
                   </tr>
@@ -199,7 +358,15 @@ export default function ShadowSignalsPage() {
   const avgTone = Number(summary.avg_return) > 0 ? 'good' : Number(summary.avg_return) < 0 ? 'bad' : 'neutral'
   const source = state.summary ? 'backend shadow API' : 'loading'
 
-  const latestOpen = useMemo(() => state.signals.filter((item) => item.status === 'OPEN'), [state.signals])
+  const sortedSignals = useMemo(() => {
+    return [...state.signals].sort((a, b) => {
+      if (a.status === 'OPEN' && b.status !== 'OPEN') return -1
+      if (a.status !== 'OPEN' && b.status === 'OPEN') return 1
+      return String(b.updated_at || b.recorded_at || b.generated_at || '').localeCompare(String(a.updated_at || a.recorded_at || a.generated_at || ''))
+    })
+  }, [state.signals])
+  const latestOpen = useMemo(() => sortedSignals.filter((item) => item.status === 'OPEN'), [sortedSignals])
+  const latestSignal = sortedSignals[0] || null
 
   return (
     <>
@@ -244,8 +411,18 @@ export default function ShadowSignalsPage() {
             <Kpi label="Max Drawdown" value={formatPct(summary.max_drawdown)} tone={Number(summary.max_drawdown) > 10 ? 'bad' : 'neutral'} />
           </div>
 
+          <div className="ops-grid">
+            <ActiveSignalPanel signal={latestOpen[0]} />
+            <FreshnessPanel health={state.health} summary={state.summary} signals={sortedSignals} />
+            <SignalContextPanel signal={latestSignal} />
+          </div>
+
           <div className="shadow-grid">
             <SymbolSummary bySymbol={state.summary?.by_symbol || {}} />
+            <ConfigSummary byConfig={state.summary?.by_config || {}} />
+          </div>
+
+          <div className="shadow-grid">
             <section className="card">
               <h2 className="mono" style={{ fontSize: 15, marginBottom: 12 }}>Integrity</h2>
               <div style={{ display: 'grid', gap: 10 }}>
@@ -257,9 +434,18 @@ export default function ShadowSignalsPage() {
                 <div className="text-muted">Signals are watchlist/research outputs until stable candidates exist.</div>
               </div>
             </section>
+            <section className="card">
+              <h2 className="mono" style={{ fontSize: 15, marginBottom: 12 }}>Selection state</h2>
+              <div className="stack">
+                <StatLine label="Stable candidates" value="0 confirmed" tone="warn" />
+                <StatLine label="Current mode" value="watchlist shadow" />
+                <StatLine label="Signal limit" value="max 1 open signal" />
+                <StatLine label="Dashboard mode" value="read-only" />
+              </div>
+            </section>
           </div>
 
-          <SignalsTable signals={state.signals} />
+          <SignalsTable signals={sortedSignals} />
         </>
       )}
     </>
