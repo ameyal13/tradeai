@@ -11,7 +11,7 @@ import pandas as pd
 
 from scripts.evaluate_shadow_signals_once import evaluate_shadow_signals_once
 from scripts.print_shadow_open_signals import open_signal_rows
-from scripts.run_shadow_ops_once import run_shadow_ops_once
+from scripts.run_shadow_ops_once import build_parser as build_shadow_ops_parser, run_shadow_ops_once
 from scripts.shadow_ops_healthcheck import build_healthcheck_report, build_parser as build_healthcheck_parser, main as healthcheck_main, print_healthcheck
 from tools.prediction_journal import utc_now
 from tools.runtime_env import load_project_env
@@ -291,6 +291,68 @@ class ShadowOpsCycleTests(unittest.IsolatedAsyncioTestCase):
                         )
 
         self.assertTrue(cycle.await_args.kwargs["use_market_context"])
+
+    def test_shadow_ops_parser_accepts_sync_supabase(self):
+        args = build_shadow_ops_parser().parse_args(["--sync-supabase"])
+
+        self.assertTrue(args.sync_supabase)
+
+    async def test_run_shadow_ops_syncs_supabase_when_enabled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            journal_path = Path(tmp) / "shadow.jsonl"
+            sync_result = {
+                "ok": True,
+                "attempted": True,
+                "reason": None,
+                "signals_upserted": 2,
+                "events_upserted": 3,
+                "journal_path": str(journal_path),
+            }
+            with patch("scripts.run_shadow_ops_once.build_healthcheck_report", new=AsyncMock(return_value={
+                "health_status": "HEALTH_OK",
+                "shadow_journal": {"open": 0},
+            })):
+                with patch("scripts.run_shadow_ops_once.evaluate_shadow_signals_once", new=AsyncMock(return_value={
+                    "found_open": 0,
+                    "closed": 0,
+                    "still_open": 0,
+                    "errors": [],
+                    "closed_signals": [],
+                })):
+                    with patch("scripts.run_shadow_ops_once.run_shadow_cycle_once", new=AsyncMock(return_value={
+                        "generation_summary": {"opened_signals": 0, "configs_scanned": 1},
+                    })):
+                        with patch("scripts.run_shadow_ops_once.sync_shadow_journal_to_supabase_safe", return_value=sync_result) as sync:
+                            result = await run_shadow_ops_once(
+                                journal_path=journal_path,
+                                reports_output_dir=Path(tmp) / "reports",
+                                sync_supabase=True,
+                            )
+
+        sync.assert_called_once_with(journal_path)
+        self.assertTrue(result["supabase_sync"]["ok"])
+        self.assertEqual(result["supabase_sync"]["signals_upserted"], 2)
+
+    async def test_run_shadow_ops_dry_run_does_not_sync_supabase(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            journal_path = Path(tmp) / "shadow.jsonl"
+            with patch("scripts.run_shadow_ops_once.build_healthcheck_report", new=AsyncMock(return_value={
+                "health_status": "HEALTH_OK",
+                "shadow_journal": {"open": 0},
+            })):
+                with patch("scripts.run_shadow_ops_once.run_shadow_cycle_once", new=AsyncMock(return_value={
+                    "generation_summary": {"opened_signals": 0, "configs_scanned": 1},
+                })):
+                    with patch("scripts.run_shadow_ops_once.sync_shadow_journal_to_supabase_safe") as sync:
+                        result = await run_shadow_ops_once(
+                            journal_path=journal_path,
+                            reports_output_dir=Path(tmp) / "reports",
+                            dry_run=True,
+                            sync_supabase=True,
+                        )
+
+        sync.assert_not_called()
+        self.assertEqual(result["supabase_sync"]["reason"], "dry_run")
 
     async def test_dry_run_does_not_write_journal(self):
         with tempfile.TemporaryDirectory() as tmp:

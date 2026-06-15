@@ -22,7 +22,34 @@ from scripts.evaluate_shadow_signals_once import evaluate_shadow_signals_once  #
 from scripts.run_shadow_cycle_once import default_journal_path, default_shadow_reports_dir, run_shadow_cycle_once  # noqa: E402
 from scripts.shadow_ops_healthcheck import build_healthcheck_report  # noqa: E402
 from scripts.summarize_shadow_signals import summarize_shadow_signals  # noqa: E402
+from scripts.sync_shadow_journal_to_supabase import build_supabase_client_from_env  # noqa: E402
 from tools.runtime_env import load_project_env  # noqa: E402
+from tools.shadow_signal_repository import ShadowSignalRepository  # noqa: E402
+
+
+def sync_shadow_journal_to_supabase_safe(journal_path: str | Path) -> dict[str, Any]:
+    """Best-effort sync from local shadow journal to Supabase.
+
+    The local JSONL journal remains the source of truth. Supabase sync is allowed
+    to fail without breaking the shadow ops cycle.
+    """
+    try:
+        supabase = build_supabase_client_from_env()
+        repo = ShadowSignalRepository(supabase_client=supabase, journal_path=journal_path)
+        result = repo.sync_local_to_supabase()
+        result["attempted"] = True
+        return result
+    except Exception as exc:
+        return {
+            "ok": False,
+            "attempted": True,
+            "reason": "sync_error",
+            "error_type": type(exc).__name__,
+            "error": str(exc)[:240],
+            "signals_upserted": 0,
+            "events_upserted": 0,
+            "journal_path": str(journal_path),
+        }
 
 
 async def run_shadow_ops_once(
@@ -34,6 +61,7 @@ async def run_shadow_ops_once(
     max_configs_scanned: int = 21,
     use_news_context: bool = False,
     use_market_context: bool = False,
+    sync_supabase: bool = False,
     refresh_cache: bool = True,
     journal_path: str | Path | None = None,
     reports_output_dir: str | Path | None = None,
@@ -89,6 +117,26 @@ async def run_shadow_ops_once(
         notify_telegram=False,
         write_report=not dry_run,
     )
+    if sync_supabase and not dry_run:
+        supabase_sync = sync_shadow_journal_to_supabase_safe(journal)
+    elif sync_supabase and dry_run:
+        supabase_sync = {
+            "ok": False,
+            "attempted": False,
+            "reason": "dry_run",
+            "signals_upserted": 0,
+            "events_upserted": 0,
+            "journal_path": str(journal),
+        }
+    else:
+        supabase_sync = {
+            "ok": False,
+            "attempted": False,
+            "reason": "disabled",
+            "signals_upserted": 0,
+            "events_upserted": 0,
+            "journal_path": str(journal),
+        }
     result = {
         "guardrails": {
             "research_only": True,
@@ -99,6 +147,7 @@ async def run_shadow_ops_once(
         "dry_run": bool(dry_run),
         "use_news_context": bool(use_news_context),
         "use_market_context": bool(use_market_context),
+        "sync_supabase": bool(sync_supabase),
         "health_before": health_before,
         "evaluation": evaluation,
         "summary_before_generation": first_summary.get("summary"),
@@ -109,6 +158,7 @@ async def run_shadow_ops_once(
         "summary_json_path": final_summary.get("json_path"),
         "summary_markdown_path": final_summary.get("markdown_path"),
         "journal_path": str(journal),
+        "supabase_sync": supabase_sync,
     }
     if notify_telegram and not dry_run:
         text = (
@@ -120,6 +170,7 @@ async def run_shadow_ops_once(
             f"Generation skipped: {generation_skipped_reason or 'no'}\n"
             f"Final open: {(final_summary.get('summary') or {}).get('open')}\n"
             f"Final closed: {(final_summary.get('summary') or {}).get('closed')}\n"
+            f"Supabase sync: {supabase_sync.get('ok')} ({supabase_sync.get('reason')})\n"
             f"Markdown: {final_summary.get('markdown_path')}"
         )
         result["ops_telegram_sent"] = send_telegram_message(text)
@@ -134,6 +185,7 @@ def print_ops_result(result: dict[str, Any]) -> None:
     print(f"dry_run: {result.get('dry_run')}")
     print(f"use_news_context: {result.get('use_news_context')}")
     print(f"use_market_context: {result.get('use_market_context')}")
+    print(f"sync_supabase: {result.get('sync_supabase')}")
     print(f"health_status: {(result.get('health_before') or {}).get('health_status')}")
     print(f"evaluated_closed: {(result.get('evaluation') or {}).get('closed')}")
     print(f"evaluation_errors: {len((result.get('evaluation') or {}).get('errors') or [])}")
@@ -146,6 +198,12 @@ def print_ops_result(result: dict[str, Any]) -> None:
     final = result.get("final_summary") or {}
     print(f"final_open: {final.get('open')}")
     print(f"final_closed: {final.get('closed')}")
+    sync = result.get("supabase_sync") or {}
+    print(f"supabase_sync_attempted: {sync.get('attempted')}")
+    print(f"supabase_sync_ok: {sync.get('ok')}")
+    print(f"supabase_sync_reason: {sync.get('reason')}")
+    print(f"supabase_signals_upserted: {sync.get('signals_upserted')}")
+    print(f"supabase_events_upserted: {sync.get('events_upserted')}")
     if result.get("summary_markdown_path"):
         print(f"summary_markdown: {result.get('summary_markdown_path')}")
 
@@ -159,6 +217,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-configs-scanned", type=int, default=21)
     parser.add_argument("--use-news-context", action="store_true")
     parser.add_argument("--use-market-context", action="store_true")
+    parser.add_argument("--sync-supabase", action="store_true")
     parser.add_argument("--refresh-cache", action="store_true", default=True)
     parser.add_argument("--no-refresh-cache", action="store_false", dest="refresh_cache")
     parser.add_argument("--journal-path", default=None)
@@ -178,6 +237,7 @@ async def main() -> None:
         max_configs_scanned=args.max_configs_scanned,
         use_news_context=args.use_news_context,
         use_market_context=args.use_market_context,
+        sync_supabase=args.sync_supabase,
         refresh_cache=args.refresh_cache,
         journal_path=args.journal_path,
         reports_output_dir=args.reports_output_dir,

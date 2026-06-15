@@ -18,7 +18,8 @@ try {
         --max-signals 1 `
         --max-configs-scanned 21 `
         --use-news-context `
-        --notify-telegram 2>&1
+        --notify-telegram `
+        --sync-supabase 2>&1
     $ExitCode = $LASTEXITCODE
     $Output | Out-File -FilePath $LogPath -Append -Encoding utf8
     Add-Content -Path $LogPath -Value "[$(Get-Date -Format o)] TRADEAI Shadow Ops task finished exit_code=$ExitCode"

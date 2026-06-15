@@ -17,6 +17,7 @@ def test_shadow_ops_wrapper_runs_safe_cycle_and_logs():
     assert "--max-configs-scanned 21" in text
     assert "--use-news-context" in text
     assert "--notify-telegram" in text
+    assert "--sync-supabase" in text
     assert "logs\\shadow_ops" in text
     assert "exit $ExitCode" in text
     assert "TELEGRAM_BOT_TOKEN" not in text
