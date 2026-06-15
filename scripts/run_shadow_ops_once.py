@@ -9,8 +9,10 @@ import argparse
 import asyncio
 import json
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -24,7 +26,12 @@ from scripts.shadow_ops_healthcheck import build_healthcheck_report  # noqa: E40
 from scripts.summarize_shadow_signals import summarize_shadow_signals  # noqa: E402
 from scripts.sync_shadow_journal_to_supabase import build_supabase_client_from_env  # noqa: E402
 from tools.runtime_env import load_project_env  # noqa: E402
+from tools.shadow_ops_cycle_repository import DEFAULT_SHADOW_OPS_CYCLES_PATH, ShadowOpsCycleRepository  # noqa: E402
 from tools.shadow_signal_repository import ShadowSignalRepository  # noqa: E402
+
+
+def utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 def sync_shadow_journal_to_supabase_safe(journal_path: str | Path) -> dict[str, Any]:
@@ -52,6 +59,57 @@ def sync_shadow_journal_to_supabase_safe(journal_path: str | Path) -> dict[str, 
         }
 
 
+def sync_shadow_ops_cycles_to_supabase_safe(cycles_path: str | Path) -> dict[str, Any]:
+    try:
+        supabase = build_supabase_client_from_env()
+        repo = ShadowOpsCycleRepository(supabase_client=supabase, path=cycles_path)
+        result = repo.sync_local_to_supabase()
+        result["attempted"] = True
+        return result
+    except Exception as exc:
+        return {
+            "ok": False,
+            "attempted": True,
+            "reason": "sync_error",
+            "error_type": type(exc).__name__,
+            "error": str(exc)[:240],
+            "cycles_upserted": 0,
+            "path": str(cycles_path),
+        }
+
+
+def build_shadow_ops_cycle_record(result: dict[str, Any], *, cycle_id: str, started_at: str, finished_at: str) -> dict[str, Any]:
+    generation = ((result.get("generation_cycle") or {}).get("generation_summary") or {})
+    evaluation = result.get("evaluation") or {}
+    final = result.get("final_summary") or {}
+    signal_sync = result.get("supabase_sync") or {}
+    return {
+        "cycle_id": cycle_id,
+        "started_at": started_at,
+        "finished_at": finished_at,
+        "dry_run": bool(result.get("dry_run")),
+        "health_status": (result.get("health_before") or {}).get("health_status"),
+        "evaluated_closed": evaluation.get("closed", 0),
+        "evaluation_errors": len(evaluation.get("errors") or []),
+        "open_after_evaluation": result.get("open_after_evaluation", 0),
+        "generation_skipped_reason": result.get("generation_skipped_reason"),
+        "opened_signals": generation.get("opened_signals", 0),
+        "configs_scanned": generation.get("configs_scanned", 0),
+        "skipped_hold": generation.get("skipped_hold", 0),
+        "skipped_duplicate_open": generation.get("skipped_duplicate_open", 0),
+        "skipped_duplicate_similar": generation.get("skipped_duplicate_similar", 0),
+        "skipped_errors": generation.get("skipped_errors", 0),
+        "status_counts": generation.get("status_counts") or {},
+        "final_open": final.get("open", 0),
+        "final_closed": final.get("closed", 0),
+        "sync_supabase": bool(result.get("sync_supabase")),
+        "supabase_sync_ok": bool(signal_sync.get("ok")),
+        "supabase_sync_reason": signal_sync.get("reason"),
+        "research_only": True,
+        "raw": result,
+    }
+
+
 async def run_shadow_ops_once(
     *,
     notify_telegram: bool = False,
@@ -65,9 +123,13 @@ async def run_shadow_ops_once(
     refresh_cache: bool = True,
     journal_path: str | Path | None = None,
     reports_output_dir: str | Path | None = None,
+    cycles_path: str | Path | None = None,
 ) -> dict[str, Any]:
+    cycle_id = str(uuid4())
+    started_at = utc_now_iso()
     journal = Path(journal_path) if journal_path else default_journal_path()
     output_dir = Path(reports_output_dir) if reports_output_dir else default_shadow_reports_dir()
+    cycles = Path(cycles_path) if cycles_path else DEFAULT_SHADOW_OPS_CYCLES_PATH
     health_before = await build_healthcheck_report(journal_path=journal)
 
     if dry_run:
@@ -138,6 +200,9 @@ async def run_shadow_ops_once(
             "journal_path": str(journal),
         }
     result = {
+        "cycle_id": cycle_id,
+        "started_at": started_at,
+        "finished_at": utc_now_iso(),
         "guardrails": {
             "research_only": True,
             "no_real_trading": True,
@@ -159,7 +224,24 @@ async def run_shadow_ops_once(
         "summary_markdown_path": final_summary.get("markdown_path"),
         "journal_path": str(journal),
         "supabase_sync": supabase_sync,
+        "cycles_path": str(cycles),
     }
+    cycle_record = build_shadow_ops_cycle_record(
+        result,
+        cycle_id=cycle_id,
+        started_at=started_at,
+        finished_at=result["finished_at"],
+    )
+    if not dry_run:
+        cycle_record = ShadowOpsCycleRepository(path=cycles).append_cycle(cycle_record)
+    if sync_supabase and not dry_run:
+        cycles_sync = sync_shadow_ops_cycles_to_supabase_safe(cycles)
+    elif sync_supabase and dry_run:
+        cycles_sync = {"ok": False, "attempted": False, "reason": "dry_run", "cycles_upserted": 0, "path": str(cycles)}
+    else:
+        cycles_sync = {"ok": False, "attempted": False, "reason": "disabled", "cycles_upserted": 0, "path": str(cycles)}
+    result["cycle_record"] = cycle_record
+    result["cycles_sync"] = cycles_sync
     if notify_telegram and not dry_run:
         text = (
             "Shadow Ops cycle finished\n"
@@ -171,6 +253,7 @@ async def run_shadow_ops_once(
             f"Final open: {(final_summary.get('summary') or {}).get('open')}\n"
             f"Final closed: {(final_summary.get('summary') or {}).get('closed')}\n"
             f"Supabase sync: {supabase_sync.get('ok')} ({supabase_sync.get('reason')})\n"
+            f"Cycle sync: {cycles_sync.get('ok')} ({cycles_sync.get('reason')})\n"
             f"Markdown: {final_summary.get('markdown_path')}"
         )
         result["ops_telegram_sent"] = send_telegram_message(text)
@@ -182,6 +265,7 @@ async def run_shadow_ops_once(
 def print_ops_result(result: dict[str, Any]) -> None:
     print("Shadow Ops cycle finished")
     print("Research only. No trading signal.")
+    print(f"cycle_id: {result.get('cycle_id')}")
     print(f"dry_run: {result.get('dry_run')}")
     print(f"use_news_context: {result.get('use_news_context')}")
     print(f"use_market_context: {result.get('use_market_context')}")
@@ -204,6 +288,11 @@ def print_ops_result(result: dict[str, Any]) -> None:
     print(f"supabase_sync_reason: {sync.get('reason')}")
     print(f"supabase_signals_upserted: {sync.get('signals_upserted')}")
     print(f"supabase_events_upserted: {sync.get('events_upserted')}")
+    cycle_sync = result.get("cycles_sync") or {}
+    print(f"cycles_sync_attempted: {cycle_sync.get('attempted')}")
+    print(f"cycles_sync_ok: {cycle_sync.get('ok')}")
+    print(f"cycles_sync_reason: {cycle_sync.get('reason')}")
+    print(f"cycles_upserted: {cycle_sync.get('cycles_upserted')}")
     if result.get("summary_markdown_path"):
         print(f"summary_markdown: {result.get('summary_markdown_path')}")
 
@@ -222,6 +311,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-refresh-cache", action="store_false", dest="refresh_cache")
     parser.add_argument("--journal-path", default=None)
     parser.add_argument("--reports-output-dir", default=None)
+    parser.add_argument("--cycles-path", default=None)
     parser.add_argument("--json", action="store_true", dest="json_output")
     return parser
 
@@ -241,6 +331,7 @@ async def main() -> None:
         refresh_cache=args.refresh_cache,
         journal_path=args.journal_path,
         reports_output_dir=args.reports_output_dir,
+        cycles_path=args.cycles_path,
     )
     if args.json_output:
         print(json.dumps(result, indent=2, sort_keys=True, default=str))

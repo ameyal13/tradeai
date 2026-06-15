@@ -41,3 +41,6 @@ def test_shadow_dashboard_exposes_monitoring_panels():
     assert "fewer than 30 closed shadow signals" in page_source
     assert "Confidence vs outcome" in page_source
     assert "Do not raise or lower thresholds from this view alone" in page_source
+    assert "Last cycle diagnostics" in page_source
+    assert "Skipped HOLD" in page_source
+    assert "api.shadow.cycles" in page_source

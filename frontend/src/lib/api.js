@@ -37,6 +37,7 @@ export const api = {
       params.set('limit', String(limit))
       return request(`/shadow/signals?${params.toString()}`)
     },
+    cycles:     ({ limit = 20 } = {}) => request(`/shadow/cycles?limit=${limit}`),
   },
   backtest: {
     run:        (payload)                 => request('/backtest/run', { method: 'POST', body: JSON.stringify(payload) }),

@@ -152,3 +152,34 @@ on shadow_signal_events(shadow_signal_id, event_sequence);
 
 alter table shadow_signals enable row level security;
 alter table shadow_signal_events enable row level security;
+
+create table if not exists shadow_ops_cycles (
+  cycle_id text primary key,
+  started_at timestamptz null,
+  finished_at timestamptz null,
+  dry_run boolean not null default false,
+  health_status text null,
+  evaluated_closed integer not null default 0,
+  evaluation_errors integer not null default 0,
+  open_after_evaluation integer not null default 0,
+  generation_skipped_reason text null,
+  opened_signals integer not null default 0,
+  configs_scanned integer not null default 0,
+  skipped_hold integer not null default 0,
+  skipped_duplicate_open integer not null default 0,
+  skipped_duplicate_similar integer not null default 0,
+  skipped_errors integer not null default 0,
+  status_counts jsonb not null default '{}'::jsonb,
+  final_open integer not null default 0,
+  final_closed integer not null default 0,
+  sync_supabase boolean not null default false,
+  supabase_sync_ok boolean not null default false,
+  supabase_sync_reason text null,
+  research_only boolean not null default true,
+  raw jsonb not null default '{}'::jsonb
+);
+
+create index if not exists shadow_ops_cycles_finished_idx
+on shadow_ops_cycles(finished_at desc);
+
+alter table shadow_ops_cycles enable row level security;

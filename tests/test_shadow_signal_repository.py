@@ -147,9 +147,16 @@ class ShadowSignalRepositoryTests(unittest.TestCase):
         self.assertEqual(result["reason"], "supabase_not_configured")
 
     def test_sync_cli_parser_and_env_client_are_safe_without_env(self):
-        args = build_parser().parse_args(["--journal-path", "data/test.jsonl", "--dry-run"])
+        args = build_parser().parse_args([
+            "--journal-path",
+            "data/test.jsonl",
+            "--cycles-path",
+            "data/cycles.jsonl",
+            "--dry-run",
+        ])
 
         self.assertEqual(args.journal_path, "data/test.jsonl")
+        self.assertEqual(args.cycles_path, "data/cycles.jsonl")
         self.assertTrue(args.dry_run)
 
 

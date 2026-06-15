@@ -488,6 +488,46 @@ function ConfidenceBuckets({ buckets }) {
   )
 }
 
+function CycleDiagnostics({ cycles }) {
+  const latest = cycles[0]
+  const statusCounts = latest?.status_counts || latest?.raw?.status_counts || {}
+  return (
+    <section className="card">
+      <div className="section-head">
+        <h2 className="panel-title">Last cycle diagnostics</h2>
+        <span className="text-muted mono" style={{ fontSize: 11 }}>HOLD / skip reasons</span>
+      </div>
+      {!latest ? (
+        <div className="text-muted">No shadow ops cycle has been synced yet.</div>
+      ) : (
+        <>
+          <div className="config-detail-grid">
+            <StatLine label="Finished" value={formatDate(latest.finished_at)} />
+            <StatLine label="Health" value={latest.health_status || '-'} tone={latest.health_status === 'HEALTH_OK' ? 'good' : 'warn'} />
+            <StatLine label="Configs scanned" value={latest.configs_scanned ?? 0} />
+            <StatLine label="Opened signals" value={latest.opened_signals ?? 0} tone={Number(latest.opened_signals) > 0 ? 'good' : 'neutral'} />
+            <StatLine label="Skipped HOLD" value={latest.skipped_hold ?? 0} tone={Number(latest.skipped_hold) > 0 ? 'warn' : 'neutral'} />
+            <StatLine label="Duplicate open" value={latest.skipped_duplicate_open ?? 0} />
+            <StatLine label="Duplicate similar" value={latest.skipped_duplicate_similar ?? 0} />
+            <StatLine label="Skipped errors" value={latest.skipped_errors ?? 0} tone={Number(latest.skipped_errors) > 0 ? 'bad' : 'neutral'} />
+            <StatLine label="Generation skipped" value={latest.generation_skipped_reason || 'no'} tone={latest.generation_skipped_reason ? 'warn' : 'neutral'} />
+            <StatLine label="Evaluated closed" value={latest.evaluated_closed ?? 0} />
+            <StatLine label="Final open" value={latest.final_open ?? 0} tone={Number(latest.final_open) > 0 ? 'warn' : 'neutral'} />
+            <StatLine label="Cycle sync" value={latest.supabase_sync_ok ? 'ok' : (latest.supabase_sync_reason || 'not ok')} tone={latest.supabase_sync_ok ? 'good' : 'warn'} />
+          </div>
+          <div className="tag-row" style={{ marginTop: 12 }}>
+            {Object.entries(statusCounts).length ? (
+              Object.entries(statusCounts).map(([key, value]) => <span className="tag" key={key}>{key}: {String(value)}</span>)
+            ) : (
+              <span className="text-muted">No status counts recorded.</span>
+            )}
+          </div>
+        </>
+      )}
+    </section>
+  )
+}
+
 function SignalsTable({ signals }) {
   return (
     <section className="card">
@@ -549,16 +589,17 @@ function SignalsTable({ signals }) {
 }
 
 export default function ShadowSignalsPage() {
-  const [state, setState] = useState({ loading: true, error: '', health: null, summary: null, signals: [] })
+  const [state, setState] = useState({ loading: true, error: '', health: null, summary: null, signals: [], cycles: [] })
   const [selectedConfig, setSelectedConfig] = useState('')
 
   async function load() {
     setState((current) => ({ ...current, loading: true, error: '' }))
     try {
-      const [health, summary, signals] = await Promise.all([
+      const [health, summary, signals, cycles] = await Promise.all([
         api.shadow.health(),
         api.shadow.summary(),
         api.shadow.signals({ limit: 50 }),
+        api.shadow.cycles({ limit: 20 }),
       ])
       setState({
         loading: false,
@@ -566,9 +607,10 @@ export default function ShadowSignalsPage() {
         health,
         summary: summary.data,
         signals: signals.data || [],
+        cycles: cycles.data || [],
       })
     } catch (err) {
-      setState({ loading: false, error: err.message, health: null, summary: null, signals: [] })
+      setState({ loading: false, error: err.message, health: null, summary: null, signals: [], cycles: [] })
     }
   }
 
@@ -664,6 +706,8 @@ export default function ShadowSignalsPage() {
           />
 
           <ConfidenceBuckets buckets={confidenceBuckets} />
+
+          <CycleDiagnostics cycles={state.cycles} />
 
           <div className="shadow-grid">
             <section className="card">

@@ -41,6 +41,7 @@ from tools.prediction_journal import (
     utc_now,
 )
 from tools.shadow_signal_journal import DEFAULT_SHADOW_JOURNAL_PATH
+from tools.shadow_ops_cycle_repository import DEFAULT_SHADOW_OPS_CYCLES_PATH, ShadowOpsCycleRepository
 from tools.shadow_signal_repository import ShadowSignalRepository
 from tools.strategy_optimizer import run_walk_forward_optimizer
 from agents.trading_agent import build_agent, generate_trading_signal
@@ -73,6 +74,7 @@ if os.getenv("SUPABASE_URL") and os.getenv("SUPABASE_SERVICE_ROLE_KEY"):
         supabase = None
 prediction_store = PredictionStore(supabase)
 shadow_signal_repo = ShadowSignalRepository(supabase_client=supabase, journal_path=DEFAULT_SHADOW_JOURNAL_PATH)
+shadow_ops_cycle_repo = ShadowOpsCycleRepository(supabase_client=supabase, path=DEFAULT_SHADOW_OPS_CYCLES_PATH)
 
 # ── WebSocket connections manager ──────────────────────────────────────────
 class ConnectionManager:
@@ -253,6 +255,20 @@ async def shadow_summary():
         "source": report.get("source", "local_jsonl"),
         "research_only": True,
         "no_real_trading": True,
+    }
+
+
+@app.get("/shadow/cycles")
+async def list_shadow_cycles(limit: int = 20):
+    """Read-only shadow ops cycle diagnostics for dashboards."""
+    safe_limit = max(1, min(int(limit), 100))
+    rows = shadow_ops_cycle_repo.list_cycles(limit=safe_limit)
+    return {
+        "data": rows,
+        "count": len(rows),
+        "research_only": True,
+        "no_real_trading": True,
+        "source": "supabase" if supabase is not None else "local_jsonl",
     }
 
 
