@@ -39,6 +39,9 @@ export const api = {
     },
     cycles:     ({ limit = 20 } = {}) => request(`/shadow/cycles?limit=${limit}`),
   },
+  research: {
+    summary:    ({ source = 'crypto_multi' } = {}) => request(`/research/summary?source=${encodeURIComponent(source)}`),
+  },
   backtest: {
     run:        (payload)                 => request('/backtest/run', { method: 'POST', body: JSON.stringify(payload) }),
     get:        (id)                      => request(`/backtest/${id}`),

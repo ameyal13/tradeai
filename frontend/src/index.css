@@ -141,6 +141,13 @@ select option { background: var(--bg3); }
   margin-bottom: 16px;
 }
 
+.research-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+  margin-bottom: 16px;
+}
+
 .ops-grid {
   display: grid;
   grid-template-columns: minmax(320px, 1.35fr) minmax(260px, 0.9fr) minmax(280px, 1fr);
@@ -329,6 +336,7 @@ select option { background: var(--bg3); }
 @media (max-width: 1100px) {
   .kpi-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .shadow-grid { grid-template-columns: 1fr; }
+  .research-grid { grid-template-columns: 1fr; }
   .ops-grid { grid-template-columns: 1fr; }
   .config-detail-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .bucket-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }

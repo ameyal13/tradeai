@@ -183,3 +183,42 @@ create index if not exists shadow_ops_cycles_finished_idx
 on shadow_ops_cycles(finished_at desc);
 
 alter table shadow_ops_cycles enable row level security;
+
+create table if not exists research_configs (
+  config_id text primary key,
+  source text not null default 'crypto_multi',
+  status text null,
+  classification text null,
+  symbol text null,
+  timeframe text null,
+  strategy_mode text null,
+  horizon_candles integer null,
+  risk_reward numeric null,
+  atr_stop_multiplier numeric null,
+  cost_mode text null,
+  median_validation_pf numeric null,
+  median_validation_avg_return numeric null,
+  median_test_pf numeric null,
+  test_confirm_rate numeric null,
+  validation_positive_rate numeric null,
+  beats_random_rate numeric null,
+  beats_deterministic_rate numeric null,
+  worst_validation_drawdown numeric null,
+  valid_windows integer null,
+  label text null,
+  config jsonb not null default '{}'::jsonb,
+  metrics jsonb not null default '{}'::jsonb,
+  raw jsonb not null default '{}'::jsonb,
+  synced_at timestamptz not null default now()
+);
+
+create index if not exists research_configs_source_idx
+on research_configs(source, classification);
+
+create index if not exists research_configs_symbol_idx
+on research_configs(symbol, timeframe);
+
+create index if not exists research_configs_validation_pf_idx
+on research_configs(median_validation_pf desc nulls last);
+
+alter table research_configs enable row level security;

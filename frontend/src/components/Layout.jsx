@@ -5,6 +5,7 @@ const NAV = [
   { to: '/', icon: 'D', label: 'Dashboard' },
   { to: '/chart', icon: 'C', label: 'Graficas' },
   { to: '/signals', icon: 'S', label: 'Senales' },
+  { to: '/research', icon: 'R', label: 'Research' },
   { to: '/news', icon: 'N', label: 'Noticias' },
   { to: '/backtest', icon: 'B', label: 'Backtest' },
 ]

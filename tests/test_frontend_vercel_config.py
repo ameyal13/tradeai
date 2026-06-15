@@ -18,9 +18,13 @@ def test_vercel_spa_rewrite_exists():
 
 def test_frontend_defines_signals_route():
     app_source = (ROOT / "frontend" / "src" / "App.jsx").read_text(encoding="utf-8")
+    layout_source = (ROOT / "frontend" / "src" / "components" / "Layout.jsx").read_text(encoding="utf-8")
 
     assert 'path="signals"' in app_source
     assert "<ShadowSignalsPage />" in app_source
+    assert 'path="research"' in app_source
+    assert "<ResearchPage />" in app_source
+    assert "/research" in layout_source
 
 
 def test_frontend_reads_vite_api_url():
@@ -28,6 +32,7 @@ def test_frontend_reads_vite_api_url():
 
     assert "import.meta.env.VITE_API_URL" in api_source
     assert ".replace(/\\/+$/, '')" in api_source
+    assert "/research/summary" in api_source
 
 
 def test_shadow_dashboard_exposes_monitoring_panels():

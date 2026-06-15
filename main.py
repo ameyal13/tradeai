@@ -40,6 +40,7 @@ from tools.prediction_journal import (
     prediction_payload_from_signal_response,
     utc_now,
 )
+from tools.research_result_repository import ResearchResultRepository
 from tools.shadow_signal_journal import DEFAULT_SHADOW_JOURNAL_PATH
 from tools.shadow_ops_cycle_repository import DEFAULT_SHADOW_OPS_CYCLES_PATH, ShadowOpsCycleRepository
 from tools.shadow_signal_repository import ShadowSignalRepository
@@ -75,6 +76,7 @@ if os.getenv("SUPABASE_URL") and os.getenv("SUPABASE_SERVICE_ROLE_KEY"):
 prediction_store = PredictionStore(supabase)
 shadow_signal_repo = ShadowSignalRepository(supabase_client=supabase, journal_path=DEFAULT_SHADOW_JOURNAL_PATH)
 shadow_ops_cycle_repo = ShadowOpsCycleRepository(supabase_client=supabase, path=DEFAULT_SHADOW_OPS_CYCLES_PATH)
+research_result_repo = ResearchResultRepository(supabase_client=supabase)
 
 # ── WebSocket connections manager ──────────────────────────────────────────
 class ConnectionManager:
@@ -269,6 +271,30 @@ async def list_shadow_cycles(limit: int = 20):
         "research_only": True,
         "no_real_trading": True,
         "source": "supabase" if supabase is not None else "local_jsonl",
+    }
+
+
+@app.get("/research/summary")
+async def research_summary(source: str = "crypto_multi"):
+    """Read-only research summary for dashboards.
+
+    Validation metrics select candidates; test metrics remain diagnostic only.
+    """
+    report = research_result_repo.summary(source=source)
+    return {
+        "data": {
+            "summary": report.get("summary"),
+            "top": report.get("top"),
+            "groupings": report.get("groupings"),
+            "asset_diagnostics": report.get("asset_diagnostics"),
+            "stability_analysis": report.get("stability_analysis"),
+            "conclusion": report.get("conclusion"),
+            "records": report.get("records"),
+        },
+        "source": report.get("source"),
+        "research_only": True,
+        "no_real_trading": True,
+        "test_not_used_for_selection": True,
     }
 
 

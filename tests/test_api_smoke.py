@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 
 from tools.prediction_journal import PredictionStore
+from tools.research_result_repository import ResearchResultRepository
 from tools.shadow_signal_journal import ShadowSignalJournal
 from tools.shadow_signal_repository import ShadowSignalRepository
 
@@ -42,6 +43,7 @@ class ApiSmokeTests(unittest.TestCase):
         main.supabase = None
         main.prediction_store = PredictionStore(file_path=Path(cls.tmp.name) / "journal.json")
         main.shadow_signal_repo = ShadowSignalRepository(journal_path=Path(cls.tmp.name) / "shadow.jsonl")
+        main.research_result_repo = ResearchResultRepository(registry_path=Path(cls.tmp.name) / "missing_registry.jsonl")
         cls.main = main
         cls.client = TestClient(main.app)
 
@@ -168,6 +170,15 @@ class ApiSmokeTests(unittest.TestCase):
         self.assertTrue(health.json()["research_only"])
         self.assertEqual(signals.json()["count"], 1)
         self.assertEqual(summary.json()["data"]["summary"]["open"], 1)
+
+    def test_research_summary_endpoint_is_read_only(self):
+        response = self.client.get("/research/summary")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["research_only"])
+        self.assertTrue(payload["test_not_used_for_selection"])
+        self.assertEqual(payload["data"]["summary"]["total_configs"], 0)
 
     def test_optimizer_run_with_manual_candles(self):
         response = self.client.post("/optimizer/run", json={
