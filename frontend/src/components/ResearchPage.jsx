@@ -118,11 +118,12 @@ function AssetDiagnostics({ rows }) {
 
 export default function ResearchPage() {
   const [state, setState] = useState({ loading: true, error: '', data: null })
+  const [source, setSource] = useState('crypto_multi')
 
   async function load() {
     setState((current) => ({ ...current, loading: true, error: '' }))
     try {
-      const res = await api.research.summary({ source: 'crypto_multi' })
+      const res = await api.research.summary({ source })
       setState({ loading: false, error: '', data: res.data })
     } catch (err) {
       setState({ loading: false, error: err.message, data: null })
@@ -131,13 +132,13 @@ export default function ResearchPage() {
 
   useEffect(() => {
     load()
-  }, [])
+  }, [source])
 
   const summary = state.data?.summary || {}
   const counts = summary.classification_counts || {}
   const assets = state.data?.asset_diagnostics?.assets_by_watchlist_count || []
   const conclusions = state.data?.conclusion || []
-  const source = state.data ? 'backend research API' : 'loading'
+  const dataSource = state.data ? 'backend research API' : 'loading'
   const top = state.data?.top || {}
   const stable = Number(summary.stable_research_candidate || 0)
   const watchlist = Number(summary.unstable_watchlist || 0)
@@ -157,10 +158,16 @@ export default function ResearchPage() {
             Multi-window research telemetry. Validation selects; test metrics are diagnostic only. Research only, no trading signal.
           </p>
         </div>
-        <button className="btn btn-secondary" type="button" onClick={load} disabled={state.loading}>
-          <RefreshCw size={14} />
-          Refresh
-        </button>
+        <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
+          <select value={source} onChange={(event) => setSource(event.target.value)}>
+            <option value="crypto_multi">crypto_multi</option>
+            <option value="focused_v2a">focused_v2a</option>
+          </select>
+          <button className="btn btn-secondary" type="button" onClick={load} disabled={state.loading}>
+            <RefreshCw size={14} />
+            Refresh
+          </button>
+        </div>
       </div>
 
       {state.error && (
@@ -175,7 +182,7 @@ export default function ResearchPage() {
       {state.loading && (
         <section className="card" style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 16 }}>
           <span className="spinner" />
-          <span className="text-muted">Loading research metrics from {source}...</span>
+          <span className="text-muted">Loading research metrics from {dataSource}...</span>
         </section>
       )}
 
