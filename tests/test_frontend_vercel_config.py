@@ -57,3 +57,13 @@ def test_research_dashboard_supports_focused_source():
     assert "crypto_multi" in page_source
     assert "focused_v2a" in page_source
     assert "api.research.summary" in page_source
+
+
+def test_research_dashboard_exposes_stability_diagnostics():
+    page_source = (ROOT / "frontend" / "src" / "components" / "ResearchPage.jsx").read_text(encoding="utf-8")
+
+    assert "formatRate" in page_source
+    assert "Why not stable" in page_source
+    assert "Top watchlist diagnostics" in page_source
+    assert "test weak" in page_source
+    assert "DD high" in page_source

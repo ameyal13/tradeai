@@ -12,11 +12,29 @@ function formatPct(value, digits = 2) {
   return `${formatNumber(value, digits)}%`
 }
 
+function formatRate(value, digits = 1) {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return '-'
+  return `${formatNumber(Number(value) * 100, digits)}%`
+}
+
 function classificationClass(value) {
   if (value === 'stable_research_candidate') return 'badge-buy'
   if (value === 'unstable_watchlist') return 'badge-medium'
   if (value === 'multi_window_reject') return 'badge-high'
   return 'badge-low'
+}
+
+function stableFailureHint(row) {
+  const classification = row?.classification
+  if (classification === 'stable_research_candidate') return 'stable'
+  if (classification === 'multi_window_reject') return 'validation failed'
+  const reasons = []
+  if (Number(row?.validation_positive_rate) < 0.6) reasons.push('val+ < 60%')
+  if (Number(row?.beats_random_rate) < 0.6) reasons.push('random < 60%')
+  if (Number(row?.beats_deterministic_rate) < 0.5) reasons.push('det < 50%')
+  if (Number(row?.test_confirm_rate) < 0.4) reasons.push('test weak')
+  if (Number(row?.worst_validation_drawdown) > 50) reasons.push('DD high')
+  return reasons.length ? reasons.join(', ') : 'unstable'
 }
 
 function Kpi({ label, value, tone = 'neutral' }) {
@@ -50,7 +68,10 @@ function TopTable({ title, rows, diagnostic = false }) {
                 <th>Val+</th>
                 <th>Beats Random</th>
                 <th>Beats Det</th>
+                <th>Test Confirm</th>
                 <th>Test PF</th>
+                <th>Worst DD</th>
+                <th>Why not stable</th>
               </tr>
             </thead>
             <tbody>
@@ -60,10 +81,13 @@ function TopTable({ title, rows, diagnostic = false }) {
                   <td><span className={`badge ${classificationClass(row.classification)}`}>{row.classification}</span></td>
                   <td>{formatNumber(row.median_validation_pf)}</td>
                   <td className={Number(row.median_validation_avg_return) >= 0 ? 'text-green' : 'text-red'}>{formatPct(row.median_validation_avg_return, 4)}</td>
-                  <td>{formatPct(row.validation_positive_rate)}</td>
-                  <td>{formatPct(row.beats_random_rate)}</td>
-                  <td>{formatPct(row.beats_deterministic_rate)}</td>
+                  <td>{formatRate(row.validation_positive_rate)}</td>
+                  <td>{formatRate(row.beats_random_rate)}</td>
+                  <td>{formatRate(row.beats_deterministic_rate)}</td>
+                  <td>{formatRate(row.test_confirm_rate)}</td>
                   <td>{formatNumber(row.median_test_pf)}</td>
+                  <td className={Number(row.worst_validation_drawdown) > 50 ? 'text-red' : ''}>{formatPct(row.worst_validation_drawdown)}</td>
+                  <td className="text-muted">{stableFailureHint(row)}</td>
                 </tr>
               ))}
             </tbody>
@@ -92,6 +116,8 @@ function AssetDiagnostics({ rows }) {
                 <th>Stable</th>
                 <th>Median PF</th>
                 <th>Median Avg</th>
+                <th>Val+</th>
+                <th>Beats Random</th>
                 <th>Promising</th>
               </tr>
             </thead>
@@ -105,6 +131,8 @@ function AssetDiagnostics({ rows }) {
                   <td>{row.stable_research_candidate}</td>
                   <td>{formatNumber(row.median_validation_pf)}</td>
                   <td className={Number(row.median_validation_avg_return) >= 0 ? 'text-green' : 'text-red'}>{formatPct(row.median_validation_avg_return, 4)}</td>
+                  <td>{formatRate(row.avg_validation_positive_rate)}</td>
+                  <td>{formatRate(row.avg_beats_random_rate)}</td>
                   <td>{row.promising ? 'yes' : 'no'}</td>
                 </tr>
               ))}
@@ -140,8 +168,15 @@ export default function ResearchPage() {
   const conclusions = state.data?.conclusion || []
   const dataSource = state.data ? 'backend research API' : 'loading'
   const top = state.data?.top || {}
+  const records = state.data?.records || []
   const stable = Number(summary.stable_research_candidate || 0)
   const watchlist = Number(summary.unstable_watchlist || 0)
+  const watchlistDiagnostics = useMemo(() => {
+    return [...records]
+      .filter((row) => row.classification === 'unstable_watchlist')
+      .sort((a, b) => Number(b.median_validation_pf || 0) - Number(a.median_validation_pf || 0))
+      .slice(0, 10)
+  }, [records])
 
   const conclusionTone = useMemo(() => {
     if (stable > 0) return 'good'
@@ -226,6 +261,7 @@ export default function ResearchPage() {
           </div>
 
           <TopTable title="Top test PF" rows={top.median_test_pf_diagnostic_only || []} diagnostic />
+          <TopTable title="Top watchlist diagnostics" rows={watchlistDiagnostics} />
         </>
       )}
     </>
