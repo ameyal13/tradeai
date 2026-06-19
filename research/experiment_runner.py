@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 
 from scripts.run_historical_experiments import load_experiment_candles
-from tools.feature_research import add_research_features, build_directional_net_returns
+from tools.feature_research import MARKET_CONTEXT_FEATURE_COLS, add_research_features, build_directional_net_returns
 from tools.ml_engine import FEATURE_COLS, _atr_label_pcts, build_trade_outcome_labels, predict_proba_xgboost, train_xgboost_model
 from tools.strategy_signals import generate_strategy_signal_from_df
 from tools.trade_opportunity_research import DEFAULT_COST_PROFILES, oracle_top_k_returns, profit_metrics, random_same_count_returns
@@ -309,8 +309,13 @@ def run_experiment_on_candles(
         raise ValueError(f"Unknown cost_mode: {cost_mode}")
     costs = DEFAULT_COST_PROFILES[cost_mode]
     data_metadata = data_metadata or {}
-    features = add_research_features(candles)
+    use_market_context_features = bool(config.get("use_market_context_features", False))
+    features = add_research_features(candles, include_market_context=use_market_context_features)
     feature_cols = list(FEATURE_COLS)
+    feature_family = "current_xgboost_features"
+    if use_market_context_features:
+        feature_cols = feature_cols + MARKET_CONTEXT_FEATURE_COLS
+        feature_family = "current_plus_market_context_v1"
     stop_pcts, take_pcts = _atr_label_pcts(
         features,
         atr_stop_multiplier=float(config["atr_stop_multiplier"]),
@@ -434,6 +439,9 @@ def run_experiment_on_candles(
             }),
             "validation_directional_exposure": directional_exposure(validation_metrics),
             "test_directional_exposure": directional_exposure(test_metrics),
+            "feature_family": feature_family,
+            "feature_cols": feature_cols,
+            "use_market_context_features": use_market_context_features,
         },
         "guardrails": {
             "no_trading": True,

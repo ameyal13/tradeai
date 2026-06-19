@@ -199,6 +199,25 @@ class ExperimentRunnerTests(unittest.IsolatedAsyncioTestCase):
         })
         self.assertIn("diagnostics", result)
         self.assertIn("beats_random_validation", result["diagnostics"])
+        self.assertEqual(result["diagnostics"]["feature_family"], "current_xgboost_features")
+        self.assertFalse(result["diagnostics"]["use_market_context_features"])
+
+    async def test_run_experiment_can_use_market_context_features_when_enabled(self):
+        import research.experiment_runner as runner
+
+        config = build_experiment_grid(min_train_rows=40, max_candles=320)[0]
+        config["use_market_context_features"] = True
+        with patch.object(runner, "load_experiment_candles", new=AsyncMock(return_value={
+            "candles": sample_candles(),
+            "data_source": "mock",
+            "data_cache_path": "",
+            "data_warning": "",
+        })):
+            result = await run_experiment(config)
+
+        self.assertEqual(result["diagnostics"]["feature_family"], "current_plus_market_context_v1")
+        self.assertTrue(result["diagnostics"]["use_market_context_features"])
+        self.assertIn("ema_trend_strength", result["diagnostics"]["feature_cols"])
 
     def test_markdown_sections_and_random_avg_render_correctly(self):
         row = {

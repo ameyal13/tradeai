@@ -29,6 +29,18 @@ TREND_COLS = ["ema_fast", "ema_slow", "macd_hist", "ema_distance_pct"]
 VOLUME_COLS = ["relative_volume"]
 TIME_COLS = ["hour_sin", "hour_cos", "day_of_week_sin", "day_of_week_cos"]
 REGIME_COLS = ["ema_distance_pct", "atr_pct"]
+MARKET_CONTEXT_FEATURE_COLS = [
+    "ema_fast_above_slow",
+    "ema_trend_strength",
+    "distance_to_ema_slow_pct",
+    "distance_to_recent_high_20_pct",
+    "distance_to_recent_low_20_pct",
+    "recent_range_20_pct",
+    "atr_regime_50",
+    "volume_regime_50",
+    "return_6",
+    "return_12",
+]
 
 
 @dataclass(frozen=True)
@@ -37,7 +49,38 @@ class PurgedFold:
     validation_positions: np.ndarray
 
 
-def add_research_features(df: pd.DataFrame) -> pd.DataFrame:
+def add_market_context_features(features: pd.DataFrame) -> pd.DataFrame:
+    """Add research-only market context features without future leakage.
+
+    All rolling values use the current and previous closed candles only. These
+    features are opt-in for research experiments and do not change live/shadow
+    signal generation unless a caller explicitly includes them.
+    """
+    data = features.copy()
+    close = data["close"].astype(float).replace(0, np.nan)
+    ema_fast = data["ema_fast"].astype(float)
+    ema_slow = data["ema_slow"].astype(float).replace(0, np.nan)
+    recent_high = data["high"].astype(float).rolling(20, min_periods=20).max()
+    recent_low = data["low"].astype(float).rolling(20, min_periods=20).min()
+    atr_pct = data["atr"].astype(float) / close
+    volume = data["volume"].astype(float)
+    volume_mean_50 = volume.rolling(50, min_periods=50).mean().replace(0, np.nan)
+    atr_mean_50 = atr_pct.rolling(50, min_periods=50).mean().replace(0, np.nan)
+
+    data["ema_fast_above_slow"] = (ema_fast > ema_slow).astype(float)
+    data["ema_trend_strength"] = (ema_fast - ema_slow) / close
+    data["distance_to_ema_slow_pct"] = (close - ema_slow) / close
+    data["distance_to_recent_high_20_pct"] = (recent_high - close) / close
+    data["distance_to_recent_low_20_pct"] = (close - recent_low) / close
+    data["recent_range_20_pct"] = (recent_high - recent_low) / close
+    data["atr_regime_50"] = atr_pct / atr_mean_50
+    data["volume_regime_50"] = volume / volume_mean_50
+    data["return_6"] = close.pct_change(6)
+    data["return_12"] = close.pct_change(12)
+    return data
+
+
+def add_research_features(df: pd.DataFrame, include_market_context: bool = False) -> pd.DataFrame:
     """Add current XGBoost features plus research-only time/regime features."""
     data = add_features(df)
     index = pd.to_datetime(data.index, utc=True)
@@ -51,6 +94,8 @@ def add_research_features(df: pd.DataFrame) -> pd.DataFrame:
     close = data["close"].astype(float).replace(0, np.nan)
     data["ema_distance_pct"] = (data["close"].astype(float) - data["ema_slow"].astype(float)) / close
     data["atr_pct"] = data["atr"].astype(float) / close
+    if include_market_context:
+        data = add_market_context_features(data)
     return data
 
 
@@ -60,6 +105,7 @@ def feature_families() -> dict[str, list[str]]:
     return {
         "all_current": current,
         "all_current_plus_time_regime": current + TIME_COLS + REGIME_COLS,
+        "all_current_plus_market_context": current + TIME_COLS + REGIME_COLS + MARKET_CONTEXT_FEATURE_COLS,
         "no_technical_indicators": [col for col in current if col not in TECHNICAL_INDICATOR_COLS],
         "returns_only": list(RETURN_COLS),
         "volatility_atr_only": list(VOLATILITY_COLS),
@@ -445,7 +491,7 @@ def run_feature_audit(
     sell_threshold: float = 0.58,
 ) -> dict[str, Any]:
     """Run feature importance, permutation importance, and ablation audit."""
-    features = add_research_features(df)
+    features = add_research_features(df, include_market_context=True)
     stop_pcts = None
     take_pcts = None
     if label_level_mode == "atr":

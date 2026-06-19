@@ -9,6 +9,7 @@ import pandas as pd
 
 from tools.feature_research import (
     FEATURE_COLS,
+    MARKET_CONTEXT_FEATURE_COLS,
     add_research_features,
     build_directional_net_returns,
     feature_correlations_to_future_return,
@@ -38,6 +39,29 @@ class FeatureResearchTests(unittest.TestCase):
             self.assertIn(column, features.columns)
         for column in ["hour_sin", "hour_cos", "day_of_week_sin", "day_of_week_cos", "atr_pct", "ema_distance_pct"]:
             self.assertIn(column, features.columns)
+
+    def test_add_research_features_market_context_is_opt_in(self):
+        default_features = add_research_features(sample_candles(120))
+        context_features = add_research_features(sample_candles(120), include_market_context=True)
+
+        self.assertNotIn("ema_trend_strength", default_features.columns)
+        for column in MARKET_CONTEXT_FEATURE_COLS:
+            self.assertIn(column, context_features.columns)
+
+    def test_market_context_features_do_not_change_when_future_candles_change(self):
+        candles = sample_candles(120)
+        changed = candles.copy()
+        changed.loc[119, ["high", "low", "close", "volume"]] = [999, 1, 500, 999999]
+
+        base_features = add_research_features(candles, include_market_context=True)
+        changed_features = add_research_features(changed, include_market_context=True)
+
+        for column in MARKET_CONTEXT_FEATURE_COLS:
+            left = base_features.iloc[80][column]
+            right = changed_features.iloc[80][column]
+            if pd.isna(left) and pd.isna(right):
+                continue
+            self.assertAlmostEqual(float(left), float(right), places=10)
 
     def test_purged_walk_forward_splits_embargo_label_horizon(self):
         positions = np.arange(40, 180)
@@ -86,6 +110,7 @@ class FeatureResearchTests(unittest.TestCase):
         )
 
         self.assertIn("all_current", audit["ablation_results"])
+        self.assertIn("all_current_plus_market_context", audit["ablation_results"])
         self.assertIn("dummy_random", audit["ablation_results"])
         self.assertIn("feature_correlations_to_future_return", audit)
         self.assertIn("removal_candidates", audit)
