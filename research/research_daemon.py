@@ -90,7 +90,7 @@ def _setup_from_daemon_config(config: dict[str, Any]) -> dict[str, Any]:
         "symbol", "timeframe", "horizon_candles", "risk_reward",
         "atr_stop_multiplier", "cost_mode", "strategy_mode", "max_candles",
         "min_train_rows", "buy_threshold", "sell_threshold", "trade_label_scheme",
-        "experiment_id",
+        "experiment_id", "use_market_context_features", "feature_family",
     }
     return {key: value for key, value in config.items() if key in keys}
 

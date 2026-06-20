@@ -71,6 +71,27 @@ class ResearchDaemonTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["selected_configs"], 2)
         self.assertEqual(result["summary"]["evaluated"], 2)
 
+    async def test_external_grid_preserves_market_context_feature_flags(self):
+        import research.research_daemon as daemon
+
+        grid = build_daemon_grid(symbols=["ADA"], horizon_candles=[10], risk_rewards=[2.0], atr_stop_multipliers=[1.25], cost_modes=["low_costs"])
+        grid[0]["use_market_context_features"] = True
+        grid[0]["feature_family"] = "current_plus_market_context_v1"
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.object(daemon, "run_multi_window_validation_for_setups", new=AsyncMock(return_value=fake_multi_window_result())) as run:
+                await run_research_cycle(
+                    grid=grid,
+                    max_configs_per_cycle=1,
+                    registry_path=Path(tmp) / "registry.jsonl",
+                    cycles_dir=Path(tmp) / "cycles",
+                    results_dir=Path(tmp) / "results",
+                    status_path=Path(tmp) / "current_status.json",
+                )
+
+        setup = run.await_args.kwargs["setups"][0]
+        self.assertTrue(setup["use_market_context_features"])
+        self.assertEqual(setup["feature_family"], "current_plus_market_context_v1")
+
     async def test_filters_completed_configs_when_resuming(self):
         import research.research_daemon as daemon
 
