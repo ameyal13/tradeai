@@ -133,27 +133,42 @@ def grouped_metrics(enriched: list[dict[str, Any]]) -> dict[str, dict[str, Any]]
     return {key: summarize_rows(value) for key, value in sorted(groups.items())}
 
 
-def alignment_win_rate_delta(groups: dict[str, dict[str, Any]]) -> float | None:
+def alignment_profit_factor_delta(groups: dict[str, dict[str, Any]]) -> float | None:
     aligned = groups.get("full_alignment=True")
     non_aligned = groups.get("full_alignment=False")
     if not aligned or not non_aligned or aligned.get("count", 0) == 0 or non_aligned.get("count", 0) == 0:
         return None
-    return round(float(aligned["win_rate"]) - float(non_aligned["win_rate"]), 6)
+    pf_aligned = aligned.get("profit_factor")
+    pf_not_aligned = non_aligned.get("profit_factor")
+    if pf_aligned is None or pf_not_aligned is None:
+        return None
+    return round(float(pf_aligned) - float(pf_not_aligned), 6)
 
 
 def automatic_conclusion(groups: dict[str, dict[str, Any]]) -> list[str]:
-    delta = alignment_win_rate_delta(groups)
+    aligned = groups.get("full_alignment=True")
+    non_aligned = groups.get("full_alignment=False")
     conclusions = ["Research only. No trading signal."]
-    if delta is None:
+    if not aligned or not non_aligned or aligned.get("count", 0) == 0 or non_aligned.get("count", 0) == 0:
         conclusions.append("Insufficient full-alignment and non-alignment samples to judge context signal.")
         return conclusions
-    conclusions.append(f"Full-alignment win-rate delta: {delta} percentage points.")
-    if abs(delta) < 5:
-        conclusions.append("context signal is weak, not recommended as filter")
-    elif delta >= 5:
-        conclusions.append("context signal warrants filter testing in next grid")
+    pf_aligned = aligned.get("profit_factor")
+    pf_not_aligned = non_aligned.get("profit_factor")
+    if pf_aligned is None or pf_not_aligned is None:
+        conclusions.append("Insufficient profit factor data to judge context signal.")
+        return conclusions
+    pf_aligned_value = float(pf_aligned)
+    pf_not_aligned_value = float(pf_not_aligned)
+    delta = round(pf_aligned_value - pf_not_aligned_value, 6)
+    conclusions.append(f"Full-alignment profit-factor delta: {delta}.")
+    if pf_aligned_value >= 1.0 and pf_not_aligned_value < 1.0:
+        conclusions.append("context signal shows directional value in PF; insufficient sample for filter decision")
+    elif pf_aligned_value < 1.0 and pf_not_aligned_value < 1.0:
+        conclusions.append("context signal insufficient")
+    elif pf_aligned_value >= 1.0 and pf_not_aligned_value >= 1.0:
+        conclusions.append("both groups viable; alignment not discriminating")
     else:
-        conclusions.append("context signal may be negatively predictive; investigate as a possible avoid/filter flag")
+        conclusions.append("context signal may be negatively predictive in PF; investigate as possible avoid flag")
     return conclusions
 
 

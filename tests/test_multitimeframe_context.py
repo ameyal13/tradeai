@@ -12,6 +12,7 @@ from research.multitimeframe_context import (
     normalize_symbol,
     trend_from_ema20_ema50,
 )
+from scripts.analyze_multitimeframe_context import alignment_profit_factor_delta, automatic_conclusion
 
 
 def candles(values):
@@ -66,6 +67,35 @@ class MultiTimeframeContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(context["btc_4h_trend"], "bearish")
         self.assertFalse(context["btc_trend_aligned"])
         self.assertFalse(context["full_alignment"])
+
+    def test_automatic_conclusion_uses_profit_factor_not_win_rate(self):
+        groups = {
+            "full_alignment=True": {"count": 4, "win_rate": 25.0, "profit_factor": 1.43},
+            "full_alignment=False": {"count": 10, "win_rate": 30.0, "profit_factor": 0.12},
+        }
+
+        self.assertEqual(alignment_profit_factor_delta(groups), 1.31)
+        conclusion = automatic_conclusion(groups)
+
+        self.assertIn("Full-alignment profit-factor delta: 1.31.", conclusion)
+        self.assertIn("context signal shows directional value in PF; insufficient sample for filter decision", conclusion)
+
+    def test_automatic_conclusion_pf_cases(self):
+        insufficient = automatic_conclusion({
+            "full_alignment=True": {"count": 1, "profit_factor": 0.5},
+        })
+        both_bad = automatic_conclusion({
+            "full_alignment=True": {"count": 2, "profit_factor": 0.5},
+            "full_alignment=False": {"count": 3, "profit_factor": 0.8},
+        })
+        both_good = automatic_conclusion({
+            "full_alignment=True": {"count": 2, "profit_factor": 1.2},
+            "full_alignment=False": {"count": 3, "profit_factor": 1.1},
+        })
+
+        self.assertIn("Insufficient full-alignment and non-alignment samples", insufficient[1])
+        self.assertIn("context signal insufficient", both_bad)
+        self.assertIn("both groups viable; alignment not discriminating", both_good)
 
 
 if __name__ == "__main__":
