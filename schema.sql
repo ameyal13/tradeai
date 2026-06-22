@@ -222,3 +222,15 @@ create index if not exists research_configs_validation_pf_idx
 on research_configs(median_validation_pf desc nulls last);
 
 alter table research_configs enable row level security;
+
+create table if not exists shadow_ops_locks (
+  lock_name text primary key,
+  owner_id text not null,
+  acquired_at timestamptz not null default now(),
+  expires_at timestamptz not null,
+  heartbeat_at timestamptz not null default now(),
+  cycle_id text null,
+  metadata jsonb not null default '{}'::jsonb
+);
+
+alter table shadow_ops_locks enable row level security;

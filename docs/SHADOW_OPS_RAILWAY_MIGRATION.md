@@ -150,3 +150,67 @@ Recommended order:
 6. Enable generation only after duplicate prevention is verified.
 
 Do not enable real trading. This is still shadow/paper research only.
+
+## Railway Dashboard Services
+
+Railway does not use a single multi-service `[services.*]` `railway.toml` from
+this repo for these cron workers. Create the services manually in the Railway
+dashboard, pointing each service at the same GitHub repo and branch.
+
+### Web Service
+
+Keep the existing backend web service:
+
+```text
+Service name: web
+Start command: uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000} --workers 1
+Healthcheck path: /health
+```
+
+### Hourly Shadow Ops Cron
+
+```text
+Service name: shadow-cron
+Schedule: 0 * * * *
+Command: python scripts/run_shadow_ops_once.py --max-signals 1 --max-configs-scanned 21 --use-news-context --sync-supabase --notify-telegram
+Restart policy: NEVER
+```
+
+Notes:
+
+- Research only. No trading signal.
+- `--sync-supabase` is required so the Vercel dashboard sees the latest shadow
+  signals and cycle results.
+- `--use-news-context` keeps the existing bounded review layer active.
+- `--use-market-context` is intentionally not included in the first Railway
+  cron command. It is available as an optional deterministic context layer, but
+  leaving it off keeps the Railway migration focused on reliability rather than
+  changing the operational signal-review context at the same time.
+
+### Daily Shadow Summary Cron
+
+```text
+Service name: shadow-summary-cron
+Schedule: 0 6 * * *
+Command: python scripts/run_shadow_summary_cron.py --notify-telegram
+Restart policy: NEVER
+```
+
+### Required Environment Variables
+
+Set these in Railway service variables. Do not expose service-role keys to the
+frontend.
+
+```text
+SUPABASE_URL
+SUPABASE_SERVICE_ROLE_KEY
+TELEGRAM_BOT_TOKEN
+TELEGRAM_CHAT_ID
+```
+
+Optional, depending on data/cache behavior:
+
+```text
+TRADEAI_DATA_DIR
+TRADEAI_REPORTS_DIR
+```

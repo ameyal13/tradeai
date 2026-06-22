@@ -8,8 +8,10 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
+import socket
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -30,8 +32,88 @@ from tools.shadow_ops_cycle_repository import DEFAULT_SHADOW_OPS_CYCLES_PATH, Sh
 from tools.shadow_signal_repository import ShadowSignalRepository  # noqa: E402
 
 
+SHADOW_OPS_LOCK_NAME = "shadow_ops_once"
+SHADOW_OPS_LOCK_MAX_AGE_MINUTES = 10
+
+
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def utc_now_dt() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def shadow_ops_owner_id() -> str:
+    return f"{socket.gethostname()}_{os.getpid()}"
+
+
+def parse_lock_dt(value: Any) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        dt = value
+    else:
+        try:
+            dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def lock_is_active(row: dict[str, Any], now: datetime | None = None) -> bool:
+    acquired_at = parse_lock_dt(row.get("acquired_at"))
+    if acquired_at is None:
+        return False
+    return acquired_at > (now or utc_now_dt()) - timedelta(minutes=SHADOW_OPS_LOCK_MAX_AGE_MINUTES)
+
+
+def acquire_shadow_ops_lock(supabase: Any, *, owner_id: str, cycle_id: str) -> dict[str, Any]:
+    if supabase is None:
+        return {"acquired": True, "reason": "supabase_not_configured", "owner_id": owner_id, "lock_enabled": False}
+    now = utc_now_dt()
+    payload = {
+        "lock_name": SHADOW_OPS_LOCK_NAME,
+        "owner_id": owner_id,
+        "acquired_at": now.isoformat(),
+        "expires_at": (now + timedelta(minutes=SHADOW_OPS_LOCK_MAX_AGE_MINUTES)).isoformat(),
+        "heartbeat_at": now.isoformat(),
+        "cycle_id": cycle_id,
+        "metadata": {"source": "run_shadow_ops_once.py", "research_only": True},
+    }
+    try:
+        supabase.table("shadow_ops_locks").insert(payload).execute()
+        return {"acquired": True, "reason": "inserted", "owner_id": owner_id, "lock_enabled": True}
+    except Exception:
+        existing = (
+            supabase.table("shadow_ops_locks")
+            .select("*")
+            .eq("lock_name", SHADOW_OPS_LOCK_NAME)
+            .limit(1)
+            .execute()
+            .data
+            or []
+        )
+        row = existing[0] if existing else None
+        if row and lock_is_active(row, now=now):
+            return {
+                "acquired": False,
+                "reason": "active_lock",
+                "owner_id": owner_id,
+                "held_by": row.get("owner_id"),
+                "lock_enabled": True,
+            }
+        supabase.table("shadow_ops_locks").upsert(payload, on_conflict="lock_name").execute()
+        return {"acquired": True, "reason": "stale_lock_overwritten", "owner_id": owner_id, "lock_enabled": True}
+
+
+def release_shadow_ops_lock(supabase: Any, *, owner_id: str) -> dict[str, Any]:
+    if supabase is None:
+        return {"released": False, "reason": "supabase_not_configured", "lock_enabled": False}
+    supabase.table("shadow_ops_locks").delete().eq("lock_name", SHADOW_OPS_LOCK_NAME).eq("owner_id", owner_id).execute()
+    return {"released": True, "reason": None, "owner_id": owner_id, "lock_enabled": True}
 
 
 def sync_shadow_journal_to_supabase_safe(journal_path: str | Path) -> dict[str, Any]:
@@ -319,20 +401,30 @@ def build_parser() -> argparse.ArgumentParser:
 async def main() -> None:
     load_project_env()
     args = build_parser().parse_args()
-    result = await run_shadow_ops_once(
-        notify_telegram=args.notify_telegram,
-        dry_run=args.dry_run,
-        allow_open_more_signals=args.allow_open_more_signals,
-        max_signals=args.max_signals,
-        max_configs_scanned=args.max_configs_scanned,
-        use_news_context=args.use_news_context,
-        use_market_context=args.use_market_context,
-        sync_supabase=args.sync_supabase,
-        refresh_cache=args.refresh_cache,
-        journal_path=args.journal_path,
-        reports_output_dir=args.reports_output_dir,
-        cycles_path=args.cycles_path,
-    )
+    cycle_id = str(uuid4())
+    owner_id = shadow_ops_owner_id()
+    supabase = build_supabase_client_from_env()
+    lock = acquire_shadow_ops_lock(supabase, owner_id=owner_id, cycle_id=cycle_id)
+    if not lock.get("acquired"):
+        print("lock held by another process, skipping")
+        return
+    try:
+        result = await run_shadow_ops_once(
+            notify_telegram=args.notify_telegram,
+            dry_run=args.dry_run,
+            allow_open_more_signals=args.allow_open_more_signals,
+            max_signals=args.max_signals,
+            max_configs_scanned=args.max_configs_scanned,
+            use_news_context=args.use_news_context,
+            use_market_context=args.use_market_context,
+            sync_supabase=args.sync_supabase,
+            refresh_cache=args.refresh_cache,
+            journal_path=args.journal_path,
+            reports_output_dir=args.reports_output_dir,
+            cycles_path=args.cycles_path,
+        )
+    finally:
+        release_shadow_ops_lock(supabase, owner_id=owner_id)
     if args.json_output:
         print(json.dumps(result, indent=2, sort_keys=True, default=str))
     else:
