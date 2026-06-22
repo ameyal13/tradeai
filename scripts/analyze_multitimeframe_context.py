@@ -12,7 +12,7 @@ import argparse
 import asyncio
 import os
 import sys
-from collections import defaultdict
+from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -92,6 +92,58 @@ def load_evaluated_shadow_signals(supabase, limit: int) -> list[dict[str, Any]]:
             continue
         filtered.append(row)
     return filtered[: int(limit)]
+
+
+def load_shadow_signal_inventory(supabase, page_size: int = 1000) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    start = 0
+    while True:
+        end = start + page_size - 1
+        response = (
+            supabase.table("shadow_signals")
+            .select("symbol,status,outcome,research_only,generated_at,side")
+            .range(start, end)
+            .execute()
+        )
+        batch = response.data or []
+        rows.extend(batch)
+        if len(batch) < page_size:
+            break
+        start += page_size
+    return rows
+
+
+def eligible_for_analysis(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    filtered: list[dict[str, Any]] = []
+    for row in rows:
+        outcome = str(row.get("outcome") or "").upper()
+        if not outcome or outcome in EXCLUDED_OUTCOMES:
+            continue
+        if not is_research_true(row.get("research_only", True)):
+            continue
+        if parse_datetime(row.get("generated_at")) is None:
+            continue
+        if normalize_signal_side(str(row.get("side") or "")) not in {"LONG", "SHORT"}:
+            continue
+        filtered.append(row)
+    return filtered
+
+
+def dry_run_inventory_summary(rows: list[dict[str, Any]], limit: int) -> dict[str, Any]:
+    signal_dates = [parse_datetime(row.get("generated_at")) for row in rows]
+    valid_dates = [value.date().isoformat() for value in signal_dates if value is not None]
+    eligible_rows = eligible_for_analysis(rows)
+    symbols = Counter(str(row.get("symbol") or "UNKNOWN").upper() for row in rows)
+    return {
+        "eligible_signals": min(len(eligible_rows), int(limit)),
+        "total_signals_in_db": len(rows),
+        "open_signals": sum(1 for row in rows if str(row.get("status") or "").upper() == "OPEN"),
+        "closed_signals": sum(1 for row in rows if str(row.get("status") or "").upper() in {"CLOSED", "EXPIRED"}),
+        "eligible_for_analysis": len(eligible_rows),
+        "oldest_signal_date": min(valid_dates) if valid_dates else None,
+        "newest_signal_date": max(valid_dates) if valid_dates else None,
+        "symbols_breakdown": dict(sorted(symbols.items())),
+    }
 
 
 def profit_factor(pnls: list[float]) -> float | None:
@@ -218,12 +270,15 @@ async def analyze(limit: int, output_dir: str | Path, dry_run: bool = False) -> 
     supabase = build_supabase_client_from_env()
     if supabase is None:
         raise RuntimeError("Supabase is not configured; set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY or SUPABASE_KEY.")
-    signals = load_evaluated_shadow_signals(supabase, limit=limit)
     if dry_run:
+        summary = dry_run_inventory_summary(load_shadow_signal_inventory(supabase), limit=limit)
         print("Multi-timeframe context dry-run")
         print("Research only. No trading signal.")
-        print(f"eligible_signals: {len(signals)}")
-        return {"eligible_signals": len(signals), "dry_run": True}
+        for key, value in summary.items():
+            print(f"{key}: {value}")
+        return {**summary, "dry_run": True}
+
+    signals = load_evaluated_shadow_signals(supabase, limit=limit)
 
     enriched: list[dict[str, Any]] = []
     warnings: list[str] = []
