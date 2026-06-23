@@ -159,18 +159,25 @@ async def generate_shadow_signals_once(
     max_configs_scanned: int | None = None,
     use_news_context: bool = False,
     use_market_context: bool = False,
+    signal_store: Any | None = None,
+    candidate_configs: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     registry_path = registry_path_from_choice(registry)
-    journal = None if dry_run else ShadowSignalJournal(journal_path)
+    journal = None if dry_run else signal_store or ShadowSignalJournal(journal_path)
     source_registry = "registry" if registry == "general" else "refined_registry" if registry == "refined" else str(registry_path)
     selected_symbols = normalize_crypto_symbols(symbols) if symbols else None
-    configs = load_candidate_configs(
-        registry_path,
-        symbols=selected_symbols,
-        allow_watchlist_shadow=allow_watchlist_shadow,
-        min_classification=min_classification,
-        include_not_allowed=True,
-    )
+    if candidate_configs is not None:
+        configs = list(candidate_configs)
+        if selected_symbols:
+            configs = [config for config in configs if str(config.get("symbol", "")).upper() in selected_symbols]
+    else:
+        configs = load_candidate_configs(
+            registry_path,
+            symbols=selected_symbols,
+            allow_watchlist_shadow=allow_watchlist_shadow,
+            min_classification=min_classification,
+            include_not_allowed=True,
+        )
     rows: list[dict[str, Any]] = []
     opened_this_batch: list[dict[str, Any]] = []
     opened = 0

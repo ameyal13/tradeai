@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from scripts.summarize_shadow_signals import build_shadow_summary, group_summaries, load_latest_shadow_rows, summarize_rows
-from tools.shadow_signal_journal import DEFAULT_SHADOW_JOURNAL_PATH
+from tools.shadow_signal_journal import DEFAULT_SHADOW_JOURNAL_PATH, OPEN, shadow_signals_are_similar
 
 
 SHADOW_SIGNAL_COLUMNS = {
@@ -254,3 +254,95 @@ class ShadowSignalRepository:
             "events_upserted": len(events),
             "journal_path": str(self.journal_path),
         }
+
+
+class SupabaseShadowSignalStore:
+    """Supabase-backed shadow signal store with the local journal interface.
+
+    This is used by Railway/stateless workers. Local mode continues to use the
+    append-only JSONL journal.
+    """
+
+    def __init__(self, supabase_client: Any):
+        if supabase_client is None:
+            raise ValueError("supabase_client is required for SupabaseShadowSignalStore")
+        self.supabase = supabase_client
+
+    def list_signals(self, status: str | None = None) -> list[dict[str, Any]]:
+        query = self.supabase.table("shadow_signals").select("*").order("generated_at", desc=False)
+        if status:
+            query = query.eq("status", status)
+        return query.execute().data or []
+
+    def has_open_signal(self, config_id: str, symbol: str, timeframe: str) -> bool:
+        rows = (
+            self.supabase.table("shadow_signals")
+            .select("shadow_signal_id")
+            .eq("status", OPEN)
+            .eq("config_id", config_id)
+            .eq("symbol", symbol.upper())
+            .eq("timeframe", timeframe)
+            .limit(1)
+            .execute()
+            .data
+            or []
+        )
+        return bool(rows)
+
+    def find_open_similar_signal(self, signal: dict[str, Any]) -> dict[str, Any] | None:
+        rows = (
+            self.supabase.table("shadow_signals")
+            .select("*")
+            .eq("status", OPEN)
+            .eq("symbol", str(signal.get("symbol", "")).upper())
+            .eq("timeframe", signal.get("timeframe"))
+            .eq("side", signal.get("side"))
+            .execute()
+            .data
+            or []
+        )
+        for row in rows:
+            if shadow_signals_are_similar(row, signal):
+                return row
+        return None
+
+    def _next_event_sequence(self, shadow_signal_id: str) -> int:
+        rows = (
+            self.supabase.table("shadow_signal_events")
+            .select("event_sequence")
+            .eq("shadow_signal_id", shadow_signal_id)
+            .order("event_sequence", desc=True)
+            .limit(1)
+            .execute()
+            .data
+            or []
+        )
+        if not rows:
+            return 1
+        return int(rows[0].get("event_sequence") or 0) + 1
+
+    def _upsert_signal_and_event(self, row: dict[str, Any]) -> dict[str, Any]:
+        payload = normalize_shadow_signal_for_store(row)
+        self.supabase.table("shadow_signals").upsert(payload, on_conflict="shadow_signal_id").execute()
+        sequence = self._next_event_sequence(str(row.get("shadow_signal_id")))
+        event = normalize_shadow_event_for_store(row, sequence)
+        self.supabase.table("shadow_signal_events").upsert(
+            event,
+            on_conflict="shadow_signal_id,event_sequence",
+        ).execute()
+        return row
+
+    def create_signal(self, payload: dict[str, Any]) -> dict[str, Any]:
+        row = dict(payload)
+        row.setdefault("status", OPEN)
+        row.setdefault("outcome", None)
+        row.setdefault("research_only", True)
+        row.setdefault("recorded_at", utc_now_iso())
+        return self._upsert_signal_and_event(row)
+
+    def update_signal(self, signal: dict[str, Any], updates: dict[str, Any]) -> dict[str, Any]:
+        row = dict(signal)
+        row.update(updates)
+        row.setdefault("research_only", True)
+        row["recorded_at"] = utc_now_iso()
+        return self._upsert_signal_and_event(row)

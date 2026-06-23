@@ -23,9 +23,12 @@ if str(PROJECT_ROOT) not in sys.path:
 from research.telegram_notifier import send_telegram_message, telegram_enabled  # noqa: E402
 from scripts.run_shadow_cycle_once import default_lock_path, registry_path_for_choice  # noqa: E402
 from scripts.summarize_shadow_signals import build_shadow_summary, default_journal_path, default_output_dir  # noqa: E402
+from scripts.sync_shadow_journal_to_supabase import build_supabase_client_from_env  # noqa: E402
 from tools.historical_data import classify_historical_data_error, fetch_binance_klines  # noqa: E402
 from tools.prediction_journal import parse_dt  # noqa: E402
+from tools.research_result_repository import ResearchResultRepository  # noqa: E402
 from tools.runtime_env import load_project_env  # noqa: E402
+from tools.shadow_signal_repository import ShadowSignalRepository  # noqa: E402
 
 
 def utc_now() -> datetime:
@@ -71,6 +74,10 @@ def _git_pending_changes() -> dict[str, Any]:
         return {"ok": False, "pending": None, "pending_count": None, "error": f"{type(exc).__name__}: {exc}"}
 
 
+def running_on_railway() -> bool:
+    return bool(os.getenv("RAILWAY_ENVIRONMENT"))
+
+
 async def _check_market_connectivity() -> dict[str, Any]:
     try:
         candles = await fetch_binance_klines("BTC", "1h", limit=1, retries=0)
@@ -110,7 +117,13 @@ async def build_healthcheck_report(
     journal = Path(journal_path) if journal_path else default_journal_path()
     registry = Path(registry_path) if registry_path else Path(registry_path_for_choice("crypto_multi"))
     lock = Path(lock_path) if lock_path else default_lock_path()
-    summary = build_shadow_summary(journal)
+    railway_mode = running_on_railway()
+    supabase = build_supabase_client_from_env() if railway_mode else None
+    if railway_mode and supabase is not None:
+        summary = ShadowSignalRepository(supabase_client=supabase, journal_path=journal).summary(prefer_supabase=True)
+        summary["journal_path"] = str(journal)
+    else:
+        summary = build_shadow_summary(journal)
     open_rows = [row for row in summary["signals"] if row.get("status") == "OPEN"]
     now = utc_now()
     overdue = []
@@ -121,7 +134,10 @@ async def build_healthcheck_report(
         except Exception:
             overdue.append(row)
 
-    registry_rows = _load_registry_latest(registry)
+    if railway_mode and supabase is not None:
+        registry_rows = ResearchResultRepository(supabase_client=supabase, source="crypto_multi").list_configs(limit=10_000)
+    else:
+        registry_rows = _load_registry_latest(registry)
     completed = sum(1 for row in registry_rows if row.get("status") == "completed")
     classifications: dict[str, int] = {}
     for row in registry_rows:
@@ -137,11 +153,11 @@ async def build_healthcheck_report(
 
     warnings: list[str] = []
     blockers: list[str] = []
-    if not journal.exists():
+    if not railway_mode and not journal.exists():
         warnings.append("shadow_journal_missing")
     if not telegram_configured:
         warnings.append("telegram_env_missing")
-    if not registry.exists():
+    if not railway_mode and not registry.exists():
         blockers.append("crypto_multi_registry_missing")
     elif completed != 64:
         warnings.append(f"crypto_multi_completed_count_{completed}")

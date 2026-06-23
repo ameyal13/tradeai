@@ -24,12 +24,14 @@ if str(PROJECT_ROOT) not in sys.path:
 from research.telegram_notifier import send_telegram_message  # noqa: E402
 from scripts.evaluate_shadow_signals_once import evaluate_shadow_signals_once  # noqa: E402
 from scripts.run_shadow_cycle_once import default_journal_path, default_shadow_reports_dir, run_shadow_cycle_once  # noqa: E402
+from scripts.generate_shadow_signals_once import generate_shadow_signals_once, summarize_generation_rows  # noqa: E402
 from scripts.shadow_ops_healthcheck import build_healthcheck_report  # noqa: E402
 from scripts.summarize_shadow_signals import summarize_shadow_signals  # noqa: E402
 from scripts.sync_shadow_journal_to_supabase import build_supabase_client_from_env  # noqa: E402
+from tools.research_result_repository import ResearchResultRepository  # noqa: E402
 from tools.runtime_env import load_project_env  # noqa: E402
 from tools.shadow_ops_cycle_repository import DEFAULT_SHADOW_OPS_CYCLES_PATH, ShadowOpsCycleRepository  # noqa: E402
-from tools.shadow_signal_repository import ShadowSignalRepository  # noqa: E402
+from tools.shadow_signal_repository import ShadowSignalRepository, SupabaseShadowSignalStore  # noqa: E402
 
 
 SHADOW_OPS_LOCK_NAME = "shadow_ops_once"
@@ -46,6 +48,10 @@ def utc_now_dt() -> datetime:
 
 def shadow_ops_owner_id() -> str:
     return f"{socket.gethostname()}_{os.getpid()}"
+
+
+def running_on_railway() -> bool:
+    return bool(os.getenv("RAILWAY_ENVIRONMENT"))
 
 
 def parse_lock_dt(value: Any) -> datetime | None:
@@ -114,6 +120,44 @@ def release_shadow_ops_lock(supabase: Any, *, owner_id: str) -> dict[str, Any]:
         return {"released": False, "reason": "supabase_not_configured", "lock_enabled": False}
     supabase.table("shadow_ops_locks").delete().eq("lock_name", SHADOW_OPS_LOCK_NAME).eq("owner_id", owner_id).execute()
     return {"released": True, "reason": None, "owner_id": owner_id, "lock_enabled": True}
+
+
+def supabase_shadow_summary(supabase: Any, journal_path: str | Path) -> dict[str, Any]:
+    return ShadowSignalRepository(supabase_client=supabase, journal_path=journal_path).summary(prefer_supabase=True)
+
+
+def supabase_candidate_configs(
+    supabase: Any,
+    *,
+    symbols: list[str],
+    allow_watchlist_shadow: bool,
+) -> list[dict[str, Any]]:
+    allowed = {"stable_research_candidate"}
+    if allow_watchlist_shadow:
+        allowed.add("unstable_watchlist")
+    symbol_filter = {symbol.upper() for symbol in symbols}
+    rows = ResearchResultRepository(supabase_client=supabase, source="crypto_multi").list_configs(limit=10_000)
+    configs: list[dict[str, Any]] = []
+    for row in rows:
+        if row.get("status") != "completed":
+            continue
+        classification = row.get("classification")
+        if classification not in allowed:
+            continue
+        config = dict(row.get("config") or {})
+        config.setdefault("symbol", row.get("symbol"))
+        config.setdefault("timeframe", row.get("timeframe"))
+        config.setdefault("strategy_mode", row.get("strategy_mode"))
+        config.setdefault("horizon_candles", row.get("horizon_candles"))
+        config.setdefault("risk_reward", row.get("risk_reward"))
+        config.setdefault("atr_stop_multiplier", row.get("atr_stop_multiplier"))
+        config.setdefault("cost_mode", row.get("cost_mode"))
+        if str(config.get("symbol", "")).upper() not in symbol_filter:
+            continue
+        config["config_id"] = row.get("config_id") or config.get("config_id")
+        config["_source_classification"] = classification
+        configs.append(config)
+    return configs
 
 
 def sync_shadow_journal_to_supabase_safe(journal_path: str | Path) -> dict[str, Any]:
@@ -212,6 +256,19 @@ async def run_shadow_ops_once(
     journal = Path(journal_path) if journal_path else default_journal_path()
     output_dir = Path(reports_output_dir) if reports_output_dir else default_shadow_reports_dir()
     cycles = Path(cycles_path) if cycles_path else DEFAULT_SHADOW_OPS_CYCLES_PATH
+    railway_mode = running_on_railway()
+    supabase = build_supabase_client_from_env() if railway_mode else None
+    supabase_first = railway_mode and supabase is not None
+    signal_store = SupabaseShadowSignalStore(supabase) if supabase_first else None
+    candidate_configs = (
+        supabase_candidate_configs(
+            supabase,
+            symbols=["ADA", "ETH", "SOL"],
+            allow_watchlist_shadow=True,
+        )
+        if supabase_first
+        else None
+    )
     health_before = await build_healthcheck_report(journal_path=journal)
 
     if dry_run:
@@ -224,13 +281,19 @@ async def run_shadow_ops_once(
             "dry_run_note": "evaluation skipped in dry-run to avoid journal writes",
         }
     else:
-        evaluation = await evaluate_shadow_signals_once(journal_path=journal, notify_telegram=notify_telegram)
+        evaluation = await evaluate_shadow_signals_once(
+            journal_path=journal,
+            notify_telegram=notify_telegram,
+            signal_store=signal_store,
+        )
 
-    first_summary = summarize_shadow_signals(
-        journal_path=journal,
-        output_dir=output_dir,
-        notify_telegram=False,
-        write_report=not dry_run,
+    first_summary = (
+        supabase_shadow_summary(supabase, journal) if supabase_first else summarize_shadow_signals(
+            journal_path=journal,
+            output_dir=output_dir,
+            notify_telegram=False,
+            write_report=not dry_run,
+        )
     )
     open_after_eval = int((first_summary.get("summary") or {}).get("open") or 0)
 
@@ -238,6 +301,35 @@ async def run_shadow_ops_once(
     generation_skipped_reason: str | None = None
     if open_after_eval > 0 and not allow_open_more_signals:
         generation_skipped_reason = "open_signals_exist"
+    elif railway_mode and not supabase_first:
+        generation_skipped_reason = "supabase_not_configured"
+    elif supabase_first:
+        generated = await generate_shadow_signals_once(
+            registry="crypto_multi",
+            symbols=["ADA", "ETH", "SOL"],
+            max_signals=max_signals,
+            max_configs_scanned=max_configs_scanned,
+            allow_watchlist_shadow=True,
+            notify_telegram=notify_telegram,
+            dry_run=dry_run,
+            min_classification="stable_research_candidate",
+            journal_path=journal,
+            refresh_cache=refresh_cache,
+            use_news_context=use_news_context,
+            use_market_context=use_market_context,
+            signal_store=signal_store,
+            candidate_configs=candidate_configs,
+        )
+        generation_cycle = {
+            "generation_summary": summarize_generation_rows(
+                generated,
+                journal_path=journal,
+                max_signals=max_signals,
+                max_configs_scanned=max_configs_scanned,
+            ),
+            "generation": generated,
+            "railway_supabase_first": True,
+        }
     else:
         generation_cycle = await run_shadow_cycle_once(
             registry="crypto_multi",
@@ -255,13 +347,24 @@ async def run_shadow_ops_once(
             use_market_context=use_market_context,
         )
 
-    final_summary = summarize_shadow_signals(
-        journal_path=journal,
-        output_dir=output_dir,
-        notify_telegram=False,
-        write_report=not dry_run,
+    final_summary = (
+        supabase_shadow_summary(supabase, journal) if supabase_first else summarize_shadow_signals(
+            journal_path=journal,
+            output_dir=output_dir,
+            notify_telegram=False,
+            write_report=not dry_run,
+        )
     )
-    if sync_supabase and not dry_run:
+    if supabase_first:
+        supabase_sync = {
+            "ok": True,
+            "attempted": False,
+            "reason": "supabase_first",
+            "signals_upserted": 0,
+            "events_upserted": 0,
+            "journal_path": str(journal),
+        }
+    elif sync_supabase and not dry_run:
         supabase_sync = sync_shadow_journal_to_supabase_safe(journal)
     elif sync_supabase and dry_run:
         supabase_sync = {
@@ -294,6 +397,8 @@ async def run_shadow_ops_once(
         "dry_run": bool(dry_run),
         "use_news_context": bool(use_news_context),
         "use_market_context": bool(use_market_context),
+        "railway_mode": bool(railway_mode),
+        "supabase_first": bool(supabase_first),
         "sync_supabase": bool(sync_supabase),
         "health_before": health_before,
         "evaluation": evaluation,
@@ -351,6 +456,8 @@ def print_ops_result(result: dict[str, Any]) -> None:
     print(f"dry_run: {result.get('dry_run')}")
     print(f"use_news_context: {result.get('use_news_context')}")
     print(f"use_market_context: {result.get('use_market_context')}")
+    print(f"railway_mode: {result.get('railway_mode')}")
+    print(f"supabase_first: {result.get('supabase_first')}")
     print(f"sync_supabase: {result.get('sync_supabase')}")
     print(f"health_status: {(result.get('health_before') or {}).get('health_status')}")
     print(f"evaluated_closed: {(result.get('evaluation') or {}).get('closed')}")

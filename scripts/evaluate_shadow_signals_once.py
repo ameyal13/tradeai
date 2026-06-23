@@ -65,8 +65,9 @@ async def evaluate_shadow_signals_once(
     notify_telegram: bool = False,
     retries: int = 2,
     backoff_seconds: float = 0.75,
+    signal_store: Any | None = None,
 ) -> dict[str, Any]:
-    journal = ShadowSignalJournal(journal_path)
+    journal = signal_store or ShadowSignalJournal(journal_path)
     open_signals = journal.list_signals(status=OPEN)
     result = {
         "found_open": len(open_signals),
