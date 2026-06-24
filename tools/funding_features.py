@@ -162,23 +162,23 @@ async def fetch_open_interest_history(
     try:
         async with httpx.AsyncClient(timeout=30) as client:
             rows: list[dict[str, Any]] = []
-            next_start = start_ms
+            next_end = end_ms
             while len(rows) < total_limit:
                 page_limit = min(500, total_limit - len(rows))
                 params: dict[str, Any] = {"symbol": ticker, "period": period, "limit": page_limit}
-                if next_start is not None:
-                    params["startTime"] = next_start
-                if end_ms is not None:
-                    params["endTime"] = end_ms
+                if next_end is not None:
+                    params["endTime"] = next_end
                 response = await client.get(f"{FUTURES_BASE}/futures/data/openInterestHist", params=params)
                 response.raise_for_status()
                 page = response.json()
                 if not page:
                     break
                 rows.extend(page)
-                last_time = int(page[-1].get("timestamp", 0))
-                next_start = last_time + 1
-                if len(page) < page_limit or (end_ms is not None and last_time >= end_ms):
+                earliest_time = int(page[0].get("timestamp", 0))
+                next_end = earliest_time - 1
+                if start_ms is not None and earliest_time <= start_ms:
+                    break
+                if len(page) < page_limit or next_end <= 0:
                     break
     except Exception as exc:  # noqa: BLE001
         print(f"warning: open-interest history unavailable for {ticker}: {type(exc).__name__}: {str(exc)[:160]}")
@@ -198,7 +198,15 @@ async def fetch_open_interest_history(
         "open_interest": pd.to_numeric(open_interest, errors="coerce"),
         "open_interest_value": pd.to_numeric(open_interest_value, errors="coerce"),
     }).dropna(subset=["timestamp"])
+    if start_ms is not None:
+        start_ts = pd.to_datetime(start_ms, unit="ms", utc=True)
+        out = out[out["timestamp"] >= start_ts]
+    if end_ms is not None:
+        end_ts = pd.to_datetime(end_ms, unit="ms", utc=True)
+        out = out[out["timestamp"] <= end_ts]
     out = out.drop_duplicates("timestamp").sort_values("timestamp").reset_index(drop=True)
+    if len(out) > total_limit:
+        out = out.tail(total_limit).reset_index(drop=True)
     _write_cache(cache_path, out)
     return out
 
