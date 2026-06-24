@@ -22,6 +22,7 @@ from tools.prediction_journal import fetch_future_klines, parse_dt, utc_now  # n
 from tools.runtime_env import load_project_env  # noqa: E402
 from tools.shadow_signal_journal import (  # noqa: E402
     DEFAULT_SHADOW_JOURNAL_PATH,
+    EXPIRED,
     OPEN,
     ShadowSignalJournal,
     evaluate_shadow_signal_with_candles,
@@ -35,6 +36,7 @@ def _is_retryable_fetch_error(exc: Exception) -> bool:
         "network",
         "rate_limited",
         "endpoint_server_error",
+        "endpoint_http_error",
     }
 
 
@@ -44,7 +46,7 @@ async def fetch_future_klines_with_retry(
     start: Any,
     end: Any,
     retries: int = 2,
-    backoff_seconds: float = 0.75,
+    backoff_seconds: float = 5.0,
 ) -> Any:
     """Fetch future candles with bounded retry/backoff for transient failures."""
     attempts = max(1, int(retries) + 1)
@@ -56,15 +58,41 @@ async def fetch_future_klines_with_retry(
             last_error = exc
             if attempt >= attempts - 1 or not _is_retryable_fetch_error(exc):
                 raise
-            await asyncio.sleep(float(backoff_seconds) * (2 ** attempt))
+            await asyncio.sleep(float(backoff_seconds))
     raise last_error or RuntimeError("unknown fetch error")
+
+
+def expired_due_to_evaluation_http_error(signal: dict[str, Any], exc: Exception, now: Any) -> dict[str, Any]:
+    """Build updates that close an unevaluable signal without blocking future cycles."""
+    category = classify_historical_data_error(exc)
+    return {
+        "status": EXPIRED,
+        "outcome": "EXPIRED",
+        "exit_price": None,
+        "exit_reason": "evaluation_http_error",
+        "expiry_reason": "evaluation_http_error",
+        "pnl_pct": None,
+        "fees": None,
+        "slippage": None,
+        "spread": signal.get("spread_pct"),
+        "mfe_pct": None,
+        "mae_pct": None,
+        "evaluated_at": now.isoformat() if hasattr(now, "isoformat") else str(now),
+        "evaluation_raw_path": {
+            "exit_reason": "evaluation_http_error",
+            "expiry_reason": "evaluation_http_error",
+            "error_type": type(exc).__name__,
+            "error_category": category,
+            "error": f"{type(exc).__name__}: {str(exc)[:240]}",
+        },
+    }
 
 
 async def evaluate_shadow_signals_once(
     journal_path: str | Path = DEFAULT_SHADOW_JOURNAL_PATH,
     notify_telegram: bool = False,
     retries: int = 2,
-    backoff_seconds: float = 0.75,
+    backoff_seconds: float = 5.0,
     signal_store: Any | None = None,
 ) -> dict[str, Any]:
     journal = signal_store or ShadowSignalJournal(journal_path)
@@ -111,6 +139,25 @@ async def evaluate_shadow_signals_once(
                     })
         except Exception as exc:  # noqa: BLE001 - keep evaluating other signals.
             category = classify_historical_data_error(exc)
+            left_open = True
+            closed = None
+            if category == "endpoint_http_error":
+                updates = expired_due_to_evaluation_http_error(signal, exc, now)
+                closed = journal.update_signal(signal, updates)
+                result["closed"] += 1
+                result["closed_signals"].append(closed)
+                left_open = False
+                if notify_telegram:
+                    try:
+                        send_telegram_message(format_shadow_signal_evaluated(closed))
+                    except Exception as telegram_exc:  # noqa: BLE001 - notifications cannot break evaluation.
+                        result["telegram_errors"].append({
+                            "shadow_signal_id": signal.get("shadow_signal_id"),
+                            "error_type": type(telegram_exc).__name__,
+                            "error": f"{type(telegram_exc).__name__}: {telegram_exc}",
+                        })
+            else:
+                result["still_open"] += 1
             result["errors"].append({
                 "shadow_signal_id": signal.get("shadow_signal_id"),
                 "symbol": signal.get("symbol"),
@@ -118,10 +165,11 @@ async def evaluate_shadow_signals_once(
                 "error_type": type(exc).__name__,
                 "error_category": category,
                 "error_code": "network_error_retry_later" if _is_retryable_fetch_error(exc) else "evaluation_error",
-                "signal_left_open": True,
+                "signal_left_open": left_open,
+                "expired_signal_id": closed.get("shadow_signal_id") if closed else None,
+                "expiry_reason": "evaluation_http_error" if not left_open else None,
                 "error": f"{type(exc).__name__}: {exc}",
             })
-            result["still_open"] += 1
     return result
 
 
@@ -154,7 +202,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--journal-path", default=str(DEFAULT_SHADOW_JOURNAL_PATH))
     parser.add_argument("--notify-telegram", action="store_true")
     parser.add_argument("--retries", type=int, default=2)
-    parser.add_argument("--backoff-seconds", type=float, default=0.75)
+    parser.add_argument("--backoff-seconds", type=float, default=5.0)
     return parser
 
 
