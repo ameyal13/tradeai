@@ -28,7 +28,6 @@ from scripts.generate_shadow_signals_once import generate_shadow_signals_once, s
 from scripts.shadow_ops_healthcheck import build_healthcheck_report  # noqa: E402
 from scripts.summarize_shadow_signals import summarize_shadow_signals  # noqa: E402
 from scripts.sync_shadow_journal_to_supabase import build_supabase_client_from_env  # noqa: E402
-from tools.research_result_repository import ResearchResultRepository  # noqa: E402
 from tools.runtime_env import load_project_env  # noqa: E402
 from tools.shadow_ops_cycle_repository import DEFAULT_SHADOW_OPS_CYCLES_PATH, ShadowOpsCycleRepository  # noqa: E402
 from tools.shadow_signal_repository import ShadowSignalRepository, SupabaseShadowSignalStore  # noqa: E402
@@ -126,17 +125,122 @@ def supabase_shadow_summary(supabase: Any, journal_path: str | Path) -> dict[str
     return ShadowSignalRepository(supabase_client=supabase, journal_path=journal_path).summary(prefer_supabase=True)
 
 
+def _count_values(rows: list[dict[str, Any]], key: str) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for row in rows:
+        value = str(row.get(key) or "")
+        counts[value] = counts.get(value, 0) + 1
+    return counts
+
+
+def _config_symbol(row: dict[str, Any]) -> str:
+    config = row.get("config") or {}
+    return str(config.get("symbol") or row.get("symbol") or "").upper()
+
+
+def _config_from_research_row(row: dict[str, Any]) -> dict[str, Any]:
+    config = dict(row.get("config") or {})
+    config.setdefault("symbol", row.get("symbol"))
+    config.setdefault("timeframe", row.get("timeframe"))
+    config.setdefault("strategy_mode", row.get("strategy_mode"))
+    config.setdefault("horizon_candles", row.get("horizon_candles"))
+    config.setdefault("risk_reward", row.get("risk_reward"))
+    config.setdefault("atr_stop_multiplier", row.get("atr_stop_multiplier"))
+    config.setdefault("cost_mode", row.get("cost_mode"))
+    config["config_id"] = row.get("config_id") or config.get("config_id")
+    config["_source_classification"] = row.get("classification")
+    return config
+
+
+def _fetch_supabase_research_config_rows(supabase: Any, source: str = "crypto_multi", limit: int = 10_000) -> list[dict[str, Any]]:
+    """Fetch research configs directly from Supabase without local fallback.
+
+    Railway is stateless, so silently falling back to a missing local registry
+    hides the real issue. This helper lets the ops cycle report whether
+    Supabase had rows, classifications, or query errors.
+    """
+    if supabase is None:
+        return []
+    data = (
+        supabase.table("research_configs")
+        .select("*")
+        .eq("source", source)
+        .limit(max(1, int(limit)))
+        .execute()
+        .data
+        or []
+    )
+    if not isinstance(data, list):
+        raise TypeError("research_configs query did not return a list")
+    return data
+
+
+def supabase_research_config_diagnostics(
+    supabase: Any,
+    *,
+    source: str = "crypto_multi",
+    symbols: list[str],
+    allow_watchlist_shadow: bool,
+) -> dict[str, Any]:
+    """Return safe counts explaining why Railway can or cannot scan configs."""
+    allowed = {"stable_research_candidate"}
+    if allow_watchlist_shadow:
+        allowed.add("unstable_watchlist")
+    symbol_filter = {symbol.upper() for symbol in symbols}
+    diagnostics: dict[str, Any] = {
+        "source": source,
+        "symbols": sorted(symbol_filter),
+        "allow_watchlist_shadow": bool(allow_watchlist_shadow),
+        "allowed_classifications": sorted(allowed),
+        "query_ok": False,
+        "query_error_type": None,
+        "query_error": None,
+        "source_rows": 0,
+        "completed_rows": 0,
+        "eligible_classification_rows": 0,
+        "symbol_filtered_rows": 0,
+        "classification_counts": {},
+        "status_counts": {},
+        "symbol_counts": {},
+    }
+    try:
+        rows = _fetch_supabase_research_config_rows(supabase, source=source)
+    except Exception as exc:  # noqa: BLE001 - diagnostics should not crash ops.
+        diagnostics.update({
+            "query_ok": False,
+            "query_error_type": type(exc).__name__,
+            "query_error": str(exc)[:240],
+        })
+        return diagnostics
+
+    completed = [row for row in rows if row.get("status") == "completed"]
+    eligible = [row for row in completed if row.get("classification") in allowed]
+    symbol_filtered = [row for row in eligible if _config_symbol(row) in symbol_filter]
+    diagnostics.update({
+        "query_ok": True,
+        "source_rows": len(rows),
+        "completed_rows": len(completed),
+        "eligible_classification_rows": len(eligible),
+        "symbol_filtered_rows": len(symbol_filtered),
+        "classification_counts": _count_values(rows, "classification"),
+        "status_counts": _count_values(rows, "status"),
+        "symbol_counts": _count_values([{"symbol": _config_symbol(row)} for row in rows], "symbol"),
+    })
+    return diagnostics
+
+
 def supabase_candidate_configs(
     supabase: Any,
     *,
     symbols: list[str],
     allow_watchlist_shadow: bool,
+    source: str = "crypto_multi",
 ) -> list[dict[str, Any]]:
     allowed = {"stable_research_candidate"}
     if allow_watchlist_shadow:
         allowed.add("unstable_watchlist")
     symbol_filter = {symbol.upper() for symbol in symbols}
-    rows = ResearchResultRepository(supabase_client=supabase, source="crypto_multi").list_configs(limit=10_000)
+    rows = _fetch_supabase_research_config_rows(supabase, source=source)
     configs: list[dict[str, Any]] = []
     for row in rows:
         if row.get("status") != "completed":
@@ -144,20 +248,35 @@ def supabase_candidate_configs(
         classification = row.get("classification")
         if classification not in allowed:
             continue
-        config = dict(row.get("config") or {})
-        config.setdefault("symbol", row.get("symbol"))
-        config.setdefault("timeframe", row.get("timeframe"))
-        config.setdefault("strategy_mode", row.get("strategy_mode"))
-        config.setdefault("horizon_candles", row.get("horizon_candles"))
-        config.setdefault("risk_reward", row.get("risk_reward"))
-        config.setdefault("atr_stop_multiplier", row.get("atr_stop_multiplier"))
-        config.setdefault("cost_mode", row.get("cost_mode"))
+        config = _config_from_research_row(row)
         if str(config.get("symbol", "")).upper() not in symbol_filter:
             continue
-        config["config_id"] = row.get("config_id") or config.get("config_id")
-        config["_source_classification"] = classification
         configs.append(config)
     return configs
+
+
+def summarize_evaluation_errors(errors: list[dict[str, Any]] | None) -> dict[str, Any]:
+    rows = list(errors or [])
+    code_counts = _count_values(rows, "error_code")
+    category_counts = _count_values(rows, "error_category")
+    return {
+        "count": len(rows),
+        "error_code_counts": code_counts,
+        "error_category_counts": category_counts,
+        "samples": [
+            {
+                "shadow_signal_id": row.get("shadow_signal_id"),
+                "symbol": row.get("symbol"),
+                "timeframe": row.get("timeframe"),
+                "error_type": row.get("error_type"),
+                "error_code": row.get("error_code"),
+                "error_category": row.get("error_category"),
+                "signal_left_open": row.get("signal_left_open"),
+                "error": str(row.get("error") or "")[:180],
+            }
+            for row in rows[:3]
+        ],
+    }
 
 
 def sync_shadow_journal_to_supabase_safe(journal_path: str | Path) -> dict[str, Any]:
@@ -207,8 +326,10 @@ def sync_shadow_ops_cycles_to_supabase_safe(cycles_path: str | Path) -> dict[str
 def build_shadow_ops_cycle_record(result: dict[str, Any], *, cycle_id: str, started_at: str, finished_at: str) -> dict[str, Any]:
     generation = ((result.get("generation_cycle") or {}).get("generation_summary") or {})
     evaluation = result.get("evaluation") or {}
+    evaluation_error_summary = result.get("evaluation_error_summary") or {}
     final = result.get("final_summary") or {}
     signal_sync = result.get("supabase_sync") or {}
+    config_diagnostics = result.get("research_config_diagnostics") or {}
     return {
         "cycle_id": cycle_id,
         "started_at": started_at,
@@ -217,7 +338,9 @@ def build_shadow_ops_cycle_record(result: dict[str, Any], *, cycle_id: str, star
         "health_status": (result.get("health_before") or {}).get("health_status"),
         "evaluated_closed": evaluation.get("closed", 0),
         "evaluation_errors": len(evaluation.get("errors") or []),
+        "evaluation_error_summary": evaluation_error_summary,
         "open_after_evaluation": result.get("open_after_evaluation", 0),
+        "research_config_diagnostics": config_diagnostics,
         "generation_skipped_reason": result.get("generation_skipped_reason"),
         "opened_signals": generation.get("opened_signals", 0),
         "configs_scanned": generation.get("configs_scanned", 0),
@@ -260,8 +383,8 @@ async def run_shadow_ops_once(
     supabase = build_supabase_client_from_env() if railway_mode else None
     supabase_first = railway_mode and supabase is not None
     signal_store = SupabaseShadowSignalStore(supabase) if supabase_first else None
-    candidate_configs = (
-        supabase_candidate_configs(
+    research_config_diagnostics = (
+        supabase_research_config_diagnostics(
             supabase,
             symbols=["ADA", "ETH", "SOL"],
             allow_watchlist_shadow=True,
@@ -269,6 +392,22 @@ async def run_shadow_ops_once(
         if supabase_first
         else None
     )
+    candidate_configs_error: dict[str, Any] | None = None
+    if supabase_first:
+        try:
+            candidate_configs = supabase_candidate_configs(
+                supabase,
+                symbols=["ADA", "ETH", "SOL"],
+                allow_watchlist_shadow=True,
+            )
+        except Exception as exc:  # noqa: BLE001 - record and keep cycle alive.
+            candidate_configs = []
+            candidate_configs_error = {
+                "error_type": type(exc).__name__,
+                "error": str(exc)[:240],
+            }
+    else:
+        candidate_configs = None
     health_before = await build_healthcheck_report(journal_path=journal)
 
     if dry_run:
@@ -286,6 +425,7 @@ async def run_shadow_ops_once(
             notify_telegram=notify_telegram,
             signal_store=signal_store,
         )
+    evaluation_error_summary = summarize_evaluation_errors(evaluation.get("errors") or [])
 
     first_summary = (
         supabase_shadow_summary(supabase, journal) if supabase_first else summarize_shadow_signals(
@@ -402,6 +542,10 @@ async def run_shadow_ops_once(
         "sync_supabase": bool(sync_supabase),
         "health_before": health_before,
         "evaluation": evaluation,
+        "evaluation_error_summary": evaluation_error_summary,
+        "research_config_diagnostics": research_config_diagnostics,
+        "candidate_configs_count": len(candidate_configs or []) if supabase_first else None,
+        "candidate_configs_error": candidate_configs_error,
         "summary_before_generation": first_summary.get("summary"),
         "open_after_evaluation": open_after_eval,
         "generation_skipped_reason": generation_skipped_reason,
@@ -435,8 +579,10 @@ async def run_shadow_ops_once(
             "Research only. No trading signal.\n\n"
             f"Health: {health_before.get('health_status')}\n"
             f"Evaluated closed: {evaluation.get('closed')}\n"
+            f"Evaluation errors: {evaluation_error_summary.get('count')}\n"
             f"Open after evaluation: {open_after_eval}\n"
             f"Generation skipped: {generation_skipped_reason or 'no'}\n"
+            f"Configs scanned: {(((result.get('generation_cycle') or {}).get('generation_summary') or {}).get('configs_scanned') or 0)}\n"
             f"Final open: {(final_summary.get('summary') or {}).get('open')}\n"
             f"Final closed: {(final_summary.get('summary') or {}).get('closed')}\n"
             f"Supabase sync: {supabase_sync.get('ok')} ({supabase_sync.get('reason')})\n"
@@ -461,13 +607,40 @@ def print_ops_result(result: dict[str, Any]) -> None:
     print(f"sync_supabase: {result.get('sync_supabase')}")
     print(f"health_status: {(result.get('health_before') or {}).get('health_status')}")
     print(f"evaluated_closed: {(result.get('evaluation') or {}).get('closed')}")
-    print(f"evaluation_errors: {len((result.get('evaluation') or {}).get('errors') or [])}")
+    error_summary = result.get("evaluation_error_summary") or {}
+    print(f"evaluation_errors: {error_summary.get('count', len((result.get('evaluation') or {}).get('errors') or []))}")
+    print(f"evaluation_error_codes: {error_summary.get('error_code_counts')}")
+    print(f"evaluation_error_categories: {error_summary.get('error_category_counts')}")
     print(f"open_after_evaluation: {result.get('open_after_evaluation')}")
     print(f"generation_skipped_reason: {result.get('generation_skipped_reason')}")
     cycle = result.get("generation_cycle") or {}
     generation = cycle.get("generation_summary") or {}
     print(f"opened_signals: {generation.get('opened_signals', 0)}")
     print(f"configs_scanned: {generation.get('configs_scanned', 0)}")
+    config_diag = result.get("research_config_diagnostics") or {}
+    if config_diag:
+        print(f"research_config_query_ok: {config_diag.get('query_ok')}")
+        print(f"research_config_source_rows: {config_diag.get('source_rows')}")
+        print(f"research_config_completed_rows: {config_diag.get('completed_rows')}")
+        print(f"research_config_eligible_classification_rows: {config_diag.get('eligible_classification_rows')}")
+        print(f"research_config_symbol_filtered_rows: {config_diag.get('symbol_filtered_rows')}")
+        print(f"research_config_classification_counts: {config_diag.get('classification_counts')}")
+        if config_diag.get("query_error_type"):
+            print(f"research_config_query_error: {config_diag.get('query_error_type')}: {config_diag.get('query_error')}")
+    print(f"candidate_configs_count: {result.get('candidate_configs_count')}")
+    if result.get("candidate_configs_error"):
+        err = result["candidate_configs_error"]
+        print(f"candidate_configs_error: {err.get('error_type')}: {err.get('error')}")
+    for sample in (error_summary.get("samples") or []):
+        print(
+            "evaluation_error_sample: "
+            f"id={sample.get('shadow_signal_id')} "
+            f"symbol={sample.get('symbol')} "
+            f"code={sample.get('error_code')} "
+            f"category={sample.get('error_category')} "
+            f"type={sample.get('error_type')} "
+            f"left_open={sample.get('signal_left_open')}"
+        )
     final = result.get("final_summary") or {}
     print(f"final_open: {final.get('open')}")
     print(f"final_closed: {final.get('closed')}")
