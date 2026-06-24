@@ -15,7 +15,6 @@ from tools.ml_engine import (
     FEATURE_COLS,
     _atr_label_pcts,
     build_trade_outcome_labels,
-    predict_proba_xgboost,
     train_xgboost_model,
 )
 from tools.prediction_journal import calculate_profit_factor
@@ -289,6 +288,18 @@ def _model_importance(model: Any, feature_cols: list[str]) -> dict[str, float]:
     return {column: round(float(values[idx]), 6) for idx, column in enumerate(feature_cols)}
 
 
+def _predict_proba_xgboost_batch(model: Any, x: np.ndarray) -> np.ndarray:
+    matrix = np.asarray(x, dtype=float)
+    if matrix.ndim == 1:
+        matrix = matrix.reshape(1, -1)
+    if len(matrix) == 0:
+        return np.array([], dtype=float)
+    proba = model.predict_proba(matrix)
+    if proba.shape[1] == 1:
+        return proba[:, 0].astype(float)
+    return proba[:, 1].astype(float)
+
+
 def _safe_mean_importances(rows: list[dict[str, float]], feature_cols: list[str]) -> dict[str, float]:
     if not rows:
         return {column: 0.0 for column in feature_cols}
@@ -377,8 +388,8 @@ def evaluate_feature_set(
                 labels.iloc[sell_train]["sell_win"].astype(int).to_numpy(),
             )
             validation_x = features.iloc[validation][available_cols].to_numpy(dtype=float)
-            buy_probs = np.array([predict_proba_xgboost(buy_model, row) for row in validation_x])
-            sell_probs = np.array([predict_proba_xgboost(sell_model, row) for row in validation_x])
+            buy_probs = _predict_proba_xgboost_batch(buy_model, validation_x)
+            sell_probs = _predict_proba_xgboost_batch(sell_model, validation_x)
             buy_importances.append(_model_importance(buy_model, available_cols))
             sell_importances.append(_model_importance(sell_model, available_cols))
 
@@ -413,8 +424,8 @@ def evaluate_feature_set(
                 permuted_frame = validation_frame.copy()
                 permuted_frame[column] = rng.permutation(permuted_frame[column].to_numpy())
                 perm_x = permuted_frame[available_cols].to_numpy(dtype=float)
-                perm_buy_probs = np.array([predict_proba_xgboost(buy_model, row) for row in perm_x])
-                perm_sell_probs = np.array([predict_proba_xgboost(sell_model, row) for row in perm_x])
+                perm_buy_probs = _predict_proba_xgboost_batch(buy_model, perm_x)
+                perm_sell_probs = _predict_proba_xgboost_batch(sell_model, perm_x)
                 perm_returns = []
                 for row_idx, buy_prob in enumerate(perm_buy_probs):
                     _, value = _select_returns(
