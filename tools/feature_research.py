@@ -40,6 +40,30 @@ MARKET_CONTEXT_FEATURE_COLS = [
     "return_6",
     "return_12",
 ]
+FUNDING_FEATURE_COLS = [
+    "funding_rate",
+    "funding_rate_ma3",
+    "funding_extreme_long",
+    "funding_extreme_short",
+    "oi_change_1h",
+    "oi_change_4h",
+    "oi_price_diverge",
+    "oi_trend_regime",
+]
+MTF_FEATURE_COLS = [
+    "tf4h_trend",
+    "tf4h_trend_strength",
+    "tf4h_rsi",
+    "tf4h_atr_ratio",
+    "tf4h_1h_aligned",
+]
+BTC_CONTEXT_FEATURE_COLS = [
+    "btc_return_1h",
+    "btc_return_4h",
+    "btc_ema_trend",
+    "asset_btc_corr_20",
+    "asset_btc_diverge",
+]
 
 
 @dataclass(frozen=True)
@@ -111,6 +135,9 @@ def feature_families() -> dict[str, list[str]]:
         "trend_only": list(TREND_COLS),
         "volume_only": list(VOLUME_COLS),
         "time_only": list(TIME_COLS),
+        "funding_only": list(FUNDING_FEATURE_COLS),
+        "mtf_4h_only": list(MTF_FEATURE_COLS),
+        "btc_context_only": list(BTC_CONTEXT_FEATURE_COLS),
         "dummy_random": current,
     }
 
@@ -338,6 +365,7 @@ def evaluate_feature_set(
     sell_threshold: float = 0.58,
     random_seed: int = 42,
     dummy_random: bool = False,
+    compute_permutation_importance: bool = True,
 ) -> dict[str, Any]:
     """Evaluate a feature set with purged temporal folds and EV metrics."""
     available_cols = [column for column in feature_cols if column in features.columns]
@@ -417,7 +445,7 @@ def evaluate_feature_set(
             if value is not None:
                 fold_returns.append(float(value))
 
-        if not dummy_random and fold_returns:
+        if not dummy_random and compute_permutation_importance and fold_returns:
             base_average = float(np.mean(fold_returns))
             validation_frame = features.iloc[validation][available_cols].copy()
             for column in available_cols:
