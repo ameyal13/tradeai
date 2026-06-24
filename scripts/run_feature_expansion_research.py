@@ -180,6 +180,27 @@ async def build_expanded_feature_frame(symbol: str, candles: pd.DataFrame) -> pd
     return pd.concat([base, funding_features, mtf_features, btc_features], axis=1)
 
 
+async def dry_run_feature_sources(symbol: str) -> dict[str, Any]:
+    """Fetch a tiny public-data sample for source verification."""
+    candles = await fetch_binance_klines(symbol, "1h", limit=10)
+    times = pd.to_datetime(candles["timestamp"], utc=True)
+    start_time = times.min()
+    end_time = times.max()
+    funding = await fetch_funding_rate_history(symbol, start_time, end_time, limit=10)
+    oi = await fetch_open_interest_history(symbol, start_time, end_time, period="1h", limit=10)
+    funding_features = compute_funding_features(candles, funding, oi)
+    return {
+        "symbol": symbol.upper(),
+        "candles_rows": int(len(candles)),
+        "funding_rows": int(len(funding)),
+        "open_interest_rows": int(len(oi)),
+        "feature_rows": int(len(funding_features)),
+        "funding_columns": list(funding.columns),
+        "open_interest_columns": list(oi.columns),
+        "feature_columns": list(funding_features.columns),
+    }
+
+
 def _window_evaluation(
     features: pd.DataFrame,
     feature_cols: list[str],
@@ -597,6 +618,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--retry-failed", action="store_true", default=False)
     parser.add_argument("--retry-running", action="store_true", default=False)
     parser.add_argument("--list-running", action="store_true", default=False)
+    parser.add_argument("--dry-run", action="store_true", default=False, help="Fetch a 10-row source sample and exit.")
     parser.add_argument("--progress", action="store_true", default=True)
     parser.add_argument("--quiet", action="store_true", default=False)
     return parser
@@ -605,6 +627,14 @@ def build_parser() -> argparse.ArgumentParser:
 async def main() -> None:
     args = build_parser().parse_args()
     symbols = parse_symbols(args.symbols)
+    if args.dry_run:
+        symbol = (symbols or ["ADA"])[0]
+        summary = await dry_run_feature_sources(symbol)
+        print("Feature Expansion v1 dry-run")
+        print("Research only. No trading signal.")
+        for key, value in summary.items():
+            print(f"{key}: {value}")
+        return
     if args.list_running:
         print_running_records(running_records(FEATURE_EXPANSION_REGISTRY_PATH, symbols=symbols))
         return

@@ -49,6 +49,12 @@ class FeatureExpansionGridTests(unittest.TestCase):
         self.assertTrue(args.once)
         self.assertTrue(args.resume)
         self.assertEqual(args.max_configs_per_cycle, 5)
+        self.assertFalse(args.dry_run)
+
+    def test_cli_accepts_dry_run(self):
+        args = build_parser().parse_args(["--dry-run"])
+
+        self.assertTrue(args.dry_run)
 
 
 if __name__ == "__main__":
