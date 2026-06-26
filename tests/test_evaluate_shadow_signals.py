@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 from scripts.evaluate_shadow_signals_once import build_parser, evaluate_shadow_signals_once
+from scripts.generate_shadow_signals_once import load_shadow_generation_candles_with_retry
 from tools.prediction_journal import utc_now
 from tools.shadow_signal_journal import EXPIRED, OPEN, ShadowSignalJournal
 
@@ -112,6 +113,48 @@ class EvaluateShadowSignalsCliTests(unittest.TestCase):
 
         self.assertEqual(args.retries, 2)
         self.assertEqual(args.backoff_seconds, 5.0)
+
+
+class GenerateShadowPriceFetchRetryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_shadow_generation_price_fetch_retries_three_attempts(self):
+        loaded = {"candles": ["ok"], "data_source": "network"}
+
+        with patch(
+            "scripts.generate_shadow_signals_once.load_experiment_candles",
+            new=AsyncMock(side_effect=[TimeoutError("timeout"), TimeoutError("timeout"), loaded]),
+        ) as fetch:
+            with patch("scripts.generate_shadow_signals_once.asyncio.sleep", new=AsyncMock()) as sleep:
+                result = await load_shadow_generation_candles_with_retry(
+                    "SOL",
+                    "1h",
+                    max_candles=5000,
+                    refresh_cache=True,
+                    retries=2,
+                    backoff_seconds=5,
+                )
+
+        self.assertEqual(fetch.await_count, 3)
+        self.assertEqual(sleep.await_count, 2)
+        self.assertEqual(result["fetch_attempts"], 3)
+
+    async def test_shadow_generation_price_fetch_raises_after_three_retryable_failures(self):
+        with patch(
+            "scripts.generate_shadow_signals_once.load_experiment_candles",
+            new=AsyncMock(side_effect=TimeoutError("timeout")),
+        ) as fetch:
+            with patch("scripts.generate_shadow_signals_once.asyncio.sleep", new=AsyncMock()) as sleep:
+                with self.assertRaises(TimeoutError):
+                    await load_shadow_generation_candles_with_retry(
+                        "SOL",
+                        "1h",
+                        max_candles=5000,
+                        refresh_cache=True,
+                        retries=2,
+                        backoff_seconds=5,
+                    )
+
+        self.assertEqual(fetch.await_count, 3)
+        self.assertEqual(sleep.await_count, 2)
 
 
 if __name__ == "__main__":

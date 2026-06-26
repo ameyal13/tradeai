@@ -23,6 +23,7 @@ from research.signal_review_agent import SignalReviewRequest, review_shadow_sign
 from research.telegram_notifier import format_shadow_signal_opened, send_telegram_message  # noqa: E402
 from scripts.run_historical_experiments import load_experiment_candles  # noqa: E402
 from scripts.summarize_research_registry import load_latest_registry_records  # noqa: E402
+from tools.historical_data import classify_historical_data_error  # noqa: E402
 from tools.shadow_signal_journal import (  # noqa: E402
     DEFAULT_SHADOW_JOURNAL_PATH,
     BLOCKED,
@@ -39,6 +40,48 @@ from tools.strategy_signals import generate_strategy_signal_from_df  # noqa: E40
 DEFAULT_REFINED_REGISTRY = PROJECT_ROOT / "reports" / "research_daemon" / "refined_registry.jsonl"
 DEFAULT_GENERAL_REGISTRY = PROJECT_ROOT / "reports" / "research_daemon" / "registry.jsonl"
 DEFAULT_CRYPTO_MULTI_REGISTRY = PROJECT_ROOT / "reports" / "research_daemon" / "crypto_multi_registry.jsonl"
+
+
+def _is_retryable_price_fetch_error(exc: Exception) -> bool:
+    return classify_historical_data_error(exc) in {
+        "dns_resolution",
+        "timeout",
+        "network",
+        "rate_limited",
+        "endpoint_server_error",
+        "endpoint_http_error",
+    }
+
+
+async def load_shadow_generation_candles_with_retry(
+    symbol: str,
+    timeframe: str,
+    *,
+    max_candles: int,
+    refresh_cache: bool,
+    retries: int = 2,
+    backoff_seconds: float = 5.0,
+) -> dict[str, Any]:
+    """Load candles for shadow generation with bounded retry/backoff."""
+    attempts = max(1, int(retries) + 1)
+    last_error: Exception | None = None
+    for attempt in range(attempts):
+        try:
+            loaded = await load_experiment_candles(
+                symbol,
+                timeframe,
+                max_candles=int(max_candles),
+                use_cache=True,
+                refresh_cache=bool(refresh_cache),
+            )
+            loaded["fetch_attempts"] = attempt + 1
+            return loaded
+        except Exception as exc:  # noqa: BLE001 - public data boundary.
+            last_error = exc
+            if attempt >= attempts - 1 or not _is_retryable_price_fetch_error(exc):
+                raise
+            await asyncio.sleep(float(backoff_seconds))
+    raise last_error or RuntimeError("unknown shadow generation price fetch error")
 
 
 def registry_path_from_choice(choice: str) -> Path:
@@ -216,11 +259,10 @@ async def generate_shadow_signals_once(
             continue
         try:
             try:
-                loaded = await load_experiment_candles(
+                loaded = await load_shadow_generation_candles_with_retry(
                     symbol,
                     timeframe,
                     max_candles=int(config.get("max_candles", 1500)),
-                    use_cache=True,
                     refresh_cache=bool(refresh_cache),
                 )
                 candles = loaded.get("candles")
@@ -230,7 +272,11 @@ async def generate_shadow_signals_once(
                         "status": "skipped_no_price",
                         "skip_reason": "no se pudo obtener precio/candles",
                         "error_type": "empty_candles",
+                        "error_category": "empty_data",
                         "error_message": "No candles loaded for shadow signal generation.",
+                        "fetch_attempts": loaded.get("fetch_attempts", 1),
+                        "data_source": loaded.get("data_source"),
+                        "data_warning": loaded.get("data_warning"),
                     })
                     continue
             except Exception as exc:  # noqa: BLE001 - classify data/price failures.
@@ -239,7 +285,9 @@ async def generate_shadow_signals_once(
                     "status": "skipped_no_price",
                     "skip_reason": "no se pudo obtener precio/candles",
                     "error_type": type(exc).__name__,
+                    "error_category": classify_historical_data_error(exc),
                     "error_message": str(exc)[:180],
+                    "fetch_attempts": 3 if _is_retryable_price_fetch_error(exc) else 1,
                 })
                 continue
             horizon_minutes = horizon_minutes_from_candles(int(config["horizon_candles"]), timeframe)
@@ -419,6 +467,8 @@ def print_rows(rows: list[dict[str, Any]], journal_path: str | Path = DEFAULT_SH
         if row.get("error_type") or row.get("error_message"):
             parts.extend([
                 f"error_type={row.get('error_type', '')}",
+                f"error_category={row.get('error_category', '')}",
+                f"fetch_attempts={row.get('fetch_attempts', '')}",
                 f"error_message={row.get('error_message', '')}",
             ])
         print(" | ".join(parts))

@@ -499,17 +499,20 @@ class ShadowSignalEngineTests(unittest.IsolatedAsyncioTestCase):
             journal = Path(tmp) / "shadow.jsonl"
             write_registry(registry, [registry_row(classification="unstable_watchlist")])
             with patch("scripts.generate_shadow_signals_once.load_experiment_candles", new=AsyncMock(side_effect=RuntimeError("network down"))):
-                rows = await generate_shadow_signals_once(
-                    registry=str(registry),
-                    journal_path=journal,
-                    allow_watchlist_shadow=True,
-                    max_signals=1,
-                    dry_run=True,
-                    refresh_cache=False,
-                )
+                with patch("scripts.generate_shadow_signals_once.asyncio.sleep", new=AsyncMock()):
+                    rows = await generate_shadow_signals_once(
+                        registry=str(registry),
+                        journal_path=journal,
+                        allow_watchlist_shadow=True,
+                        max_signals=1,
+                        dry_run=True,
+                        refresh_cache=False,
+                    )
 
         self.assertEqual(rows[0]["status"], "skipped_no_price")
         self.assertEqual(rows[0]["error_type"], "RuntimeError")
+        self.assertEqual(rows[0]["error_category"], "network")
+        self.assertEqual(rows[0]["fetch_attempts"], 3)
         self.assertIn("network down", rows[0]["error_message"])
 
     async def test_invalid_levels_are_reported(self):
