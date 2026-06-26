@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useState } from 'react'
-import { Activity, AlertTriangle, Clock, Database, RefreshCw, ShieldCheck, TrendingUp } from 'lucide-react'
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
+import { createChart, LineStyle } from 'lightweight-charts'
+import { Activity, AlertTriangle, Clock, Database, RefreshCw, ShieldCheck, TrendingUp, X } from 'lucide-react'
 import { api } from '../lib/api.js'
 
 function formatNumber(value, digits = 2) {
@@ -10,6 +11,13 @@ function formatNumber(value, digits = 2) {
 function formatPct(value, digits = 2) {
   if (value === null || value === undefined || Number.isNaN(Number(value))) return '-'
   return `${formatNumber(value, digits)}%`
+}
+
+function formatProbability(value, digits = 2) {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return '-'
+  const numeric = Number(value)
+  const asPercent = Math.abs(numeric) <= 1 ? numeric * 100 : numeric
+  return `${formatNumber(asPercent, digits)}%`
 }
 
 function formatDate(value) {
@@ -33,6 +41,128 @@ function shortId(value) {
 function toNumber(value, fallback = 0) {
   const numeric = Number(value)
   return Number.isFinite(numeric) ? numeric : fallback
+}
+
+function toFiniteNumber(value) {
+  const numeric = Number(value)
+  return Number.isFinite(numeric) ? numeric : null
+}
+
+function getSignalCloseTime(signal) {
+  return signal?.closed_at
+    || signal?.evaluated_at
+    || signal?.updated_at
+    || signal?.recorded_at
+    || signal?.expires_at
+    || signal?.generated_at
+}
+
+function isFinishedSignal(signal) {
+  return Boolean(signal && signal.status !== 'OPEN' && (signal.outcome || signal.status === 'CLOSED' || signal.status === 'EXPIRED'))
+}
+
+function hoursBetween(start, end) {
+  if (!start || !end) return null
+  const startDate = new Date(start)
+  const endDate = new Date(end)
+  if (Number.isNaN(startDate.getTime()) || Number.isNaN(endDate.getTime())) return null
+  return (endDate.getTime() - startDate.getTime()) / 3600000
+}
+
+function normalizeChartPoints(points) {
+  let lastTime = 0
+  return points
+    .filter((point) => point && Number.isFinite(point.time) && Number.isFinite(point.value))
+    .sort((a, b) => a.time - b.time)
+    .map((point) => {
+      const nextTime = point.time <= lastTime ? lastTime + 1 : point.time
+      lastTime = nextTime
+      return { ...point, time: nextTime }
+    })
+}
+
+function buildEquityCurve(signals) {
+  let cumulative = 0
+  const points = []
+  const sorted = [...signals]
+    .filter((signal) => isFinishedSignal(signal) && toFiniteNumber(signal.pnl_pct) !== null && getSignalCloseTime(signal))
+    .sort((a, b) => new Date(getSignalCloseTime(a)).getTime() - new Date(getSignalCloseTime(b)).getTime())
+
+  for (const signal of sorted) {
+    cumulative += Number(signal.pnl_pct)
+    points.push({
+      time: Math.floor(new Date(getSignalCloseTime(signal)).getTime() / 1000),
+      value: Number(cumulative.toFixed(6)),
+      signal,
+    })
+  }
+  return normalizeChartPoints(points)
+}
+
+function calculateProfitFactor(returns) {
+  const gains = returns.filter((value) => value > 0).reduce((acc, value) => acc + value, 0)
+  const losses = Math.abs(returns.filter((value) => value < 0).reduce((acc, value) => acc + value, 0))
+  if (losses > 0) return gains / losses
+  if (gains > 0) return 5
+  return 0
+}
+
+function buildRollingProfitFactor(signals, windowSize = 10) {
+  const sorted = [...signals]
+    .filter((signal) => isFinishedSignal(signal) && toFiniteNumber(signal.pnl_pct) !== null && getSignalCloseTime(signal))
+    .sort((a, b) => new Date(getSignalCloseTime(a)).getTime() - new Date(getSignalCloseTime(b)).getTime())
+
+  const points = sorted.map((signal, index) => {
+    const window = sorted.slice(Math.max(0, index - windowSize + 1), index + 1)
+    const returns = window.map((item) => Number(item.pnl_pct))
+    return {
+      time: Math.floor(new Date(getSignalCloseTime(signal)).getTime() / 1000),
+      value: Number(calculateProfitFactor(returns).toFixed(6)),
+      signal,
+    }
+  })
+  return normalizeChartPoints(points)
+}
+
+function compactEntries(value, max = 6) {
+  if (!value || typeof value !== 'object') return []
+  return Object.entries(value)
+    .filter(([, item]) => item !== null && item !== undefined && ['string', 'number', 'boolean'].includes(typeof item))
+    .slice(0, max)
+}
+
+function findDeepNumber(source, names) {
+  if (!source || typeof source !== 'object') return 0
+  const wanted = new Set(names.map((name) => String(name).toLowerCase()))
+  const stack = [source]
+  const seen = new Set()
+  while (stack.length) {
+    const item = stack.pop()
+    if (!item || typeof item !== 'object' || seen.has(item)) continue
+    seen.add(item)
+    for (const [key, value] of Object.entries(item)) {
+      if (wanted.has(String(key).toLowerCase())) {
+        const numeric = toFiniteNumber(value)
+        if (numeric !== null) return numeric
+      }
+      if (value && typeof value === 'object') stack.push(value)
+    }
+  }
+  return 0
+}
+
+function getCycleIssues(cycle) {
+  if (!cycle) return null
+  const skippedNoPrice = findDeepNumber(cycle, ['skipped_no_price'])
+  const evaluationErrors = findDeepNumber(cycle, ['evaluation_errors', 'evaluation_error_count'])
+  const skippedErrors = findDeepNumber(cycle, ['skipped_errors'])
+  if (skippedNoPrice <= 0 && evaluationErrors <= 0 && skippedErrors <= 0) return null
+  return {
+    skippedNoPrice,
+    evaluationErrors,
+    skippedErrors,
+    finishedAt: cycle.finished_at || cycle.updated_at || cycle.created_at,
+  }
 }
 
 function statusClass(status) {
@@ -67,6 +197,138 @@ function StatLine({ label, value, tone = 'neutral' }) {
       <span className="text-muted">{label}</span>
       <span className={`mono ${className}`}>{value}</span>
     </div>
+  )
+}
+
+function MetricLineChart({ points, baseline = null, height = 220, segmented = false, positiveAboveZero = false }) {
+  const containerRef = useRef(null)
+
+  useEffect(() => {
+    if (!containerRef.current) return undefined
+    const chart = createChart(containerRef.current, {
+      height,
+      layout: {
+        background: { color: 'transparent' },
+        textColor: '#5a6a7a',
+        fontFamily: 'IBM Plex Mono',
+      },
+      grid: {
+        vertLines: { color: 'rgba(42,51,64,0.35)' },
+        horzLines: { color: 'rgba(42,51,64,0.35)' },
+      },
+      rightPriceScale: {
+        borderColor: 'rgba(42,51,64,0.65)',
+      },
+      timeScale: {
+        borderColor: 'rgba(42,51,64,0.65)',
+        timeVisible: true,
+        secondsVisible: false,
+      },
+      crosshair: {
+        vertLine: { color: 'rgba(90,106,122,0.35)' },
+        horzLine: { color: 'rgba(90,106,122,0.35)' },
+      },
+    })
+
+    if (points.length) {
+      if (baseline !== null) {
+        const baselineSeries = chart.addLineSeries({
+          color: 'rgba(232,237,243,0.42)',
+          lineWidth: 1,
+          lineStyle: LineStyle.Dashed,
+          priceLineVisible: false,
+          lastValueVisible: false,
+        })
+        baselineSeries.setData([
+          { time: points[0].time, value: baseline },
+          { time: points[points.length - 1].time, value: baseline },
+        ])
+      }
+
+      if (segmented && points.length > 1) {
+        for (let index = 1; index < points.length; index += 1) {
+          const previous = points[index - 1]
+          const current = points[index]
+          const color = current.value >= previous.value ? '#00d4a0' : '#ff4d6a'
+          const series = chart.addLineSeries({
+            color,
+            lineWidth: 2,
+            priceLineVisible: false,
+            lastValueVisible: false,
+          })
+          series.setData([previous, current])
+        }
+      } else {
+        const last = points[points.length - 1]
+        const color = positiveAboveZero ? (last.value >= baseline ? '#00d4a0' : '#ff4d6a') : '#4090ff'
+        const series = chart.addLineSeries({
+          color,
+          lineWidth: 2,
+          priceLineVisible: false,
+        })
+        series.setData(points)
+      }
+      chart.timeScale().fitContent()
+    }
+
+    const resize = () => {
+      if (containerRef.current) {
+        chart.applyOptions({ width: containerRef.current.clientWidth })
+      }
+    }
+    resize()
+    window.addEventListener('resize', resize)
+    return () => {
+      window.removeEventListener('resize', resize)
+      chart.remove()
+    }
+  }, [points, baseline, height, segmented, positiveAboveZero])
+
+  if (!points.length) {
+    return (
+      <div className="chart-empty" style={{ minHeight: height }}>
+        <span className="text-muted">No closed signal data yet.</span>
+      </div>
+    )
+  }
+
+  return <div className="metric-chart" ref={containerRef} style={{ height }} />
+}
+
+function PerformanceCharts({ signals }) {
+  const equityPoints = useMemo(() => buildEquityCurve(signals), [signals])
+  const rollingPfPoints = useMemo(() => buildRollingProfitFactor(signals, 10), [signals])
+  return (
+    <section className="card chart-section">
+      <div className="section-head">
+        <h2 className="panel-title">Equity curve</h2>
+        <span className="text-muted mono" style={{ fontSize: 11 }}>{equityPoints.length} closed points</span>
+      </div>
+      <MetricLineChart points={equityPoints} baseline={0} segmented height={240} />
+
+      <div className="section-head chart-subhead">
+        <h2 className="panel-title">Rolling profit factor</h2>
+        <span className="text-muted mono" style={{ fontSize: 11 }}>last 10 closed signals</span>
+      </div>
+      <MetricLineChart points={rollingPfPoints} baseline={1} height={180} positiveAboveZero />
+    </section>
+  )
+}
+
+function CycleWarningBanner({ issue }) {
+  if (!issue) return null
+  return (
+    <section className="cycle-warning">
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+        <AlertTriangle size={18} color="var(--amber)" />
+        <div>
+          <div className="mono" style={{ color: 'var(--amber)' }}>Last shadow cycle warning</div>
+          <div className="text-muted" style={{ fontSize: 12 }}>
+            skipped_no_price={issue.skippedNoPrice} | evaluation_errors={issue.evaluationErrors} | skipped_errors={issue.skippedErrors} | {formatDate(issue.finishedAt)}
+          </div>
+        </div>
+      </div>
+    </section>
   )
 }
 
@@ -172,8 +434,8 @@ function SignalContextPanel({ signal }) {
         <div className="stack">
           <StatLine label="Latest signal" value={`${signal.symbol || '-'} ${signal.side || '-'} ${signal.status || '-'}`} />
           <StatLine label="Model" value={signal.model_name || features.model_name || '-'} />
-          <StatLine label="Buy probability" value={formatPct(features.probability_buy_win, 2)} />
-          <StatLine label="Sell probability" value={formatPct(features.probability_sell_win, 2)} />
+          <StatLine label="Buy probability" value={formatProbability(features.probability_buy_win, 2)} />
+          <StatLine label="Sell probability" value={formatProbability(features.probability_sell_win, 2)} />
           <StatLine label="Agent review" value={review.review_status || '-'} tone={review.review_status === 'BLOCK' ? 'bad' : review.review_status === 'CAUTION' ? 'warn' : 'neutral'} />
           <StatLine label="News context" value={news.context_status || news.provider_status || news.sentiment || '-'} />
           <StatLine label="Market context" value={market.context_status || market.review_status || '-'} />
@@ -322,7 +584,7 @@ function SymbolSummary({ bySymbol }) {
   )
 }
 
-function ConfigSummary({ byConfig }) {
+function ConfigSummary({ byConfig, onOpenConfig }) {
   const rows = Object.entries(byConfig || {})
     .sort(([, a], [, b]) => Number(b.closed || 0) - Number(a.closed || 0))
     .slice(0, 8)
@@ -346,7 +608,11 @@ function ConfigSummary({ byConfig }) {
             <tbody>
               {rows.map(([config, item]) => (
                 <tr key={config}>
-                  <td className="mono">{shortId(config)}</td>
+                  <td>
+                    <button className="table-link mono" type="button" onClick={() => onOpenConfig(config)}>
+                      {shortId(config)}
+                    </button>
+                  </td>
                   <td>{item.total}</td>
                   <td>{formatPct(item.win_rate)}</td>
                   <td>{formatNumber(item.profit_factor, 4)}</td>
@@ -358,6 +624,70 @@ function ConfigSummary({ byConfig }) {
         </div>
       )}
     </section>
+  )
+}
+
+function ConfigSignalsDrawer({ configId, signals, onClose }) {
+  const configSignals = useMemo(() => {
+    return signals
+      .filter((signal) => signal.config_id === configId)
+      .sort((a, b) => new Date(a.generated_at || 0).getTime() - new Date(b.generated_at || 0).getTime())
+  }, [configId, signals])
+  const equityPoints = useMemo(() => buildEquityCurve(configSignals), [configSignals])
+  const closed = configSignals.filter((signal) => isFinishedSignal(signal))
+
+  if (!configId) return null
+
+  return (
+    <div className="drawer-backdrop" onClick={onClose}>
+      <aside className="drawer-panel" onClick={(event) => event.stopPropagation()}>
+        <div className="drawer-head">
+          <div>
+            <div className="text-muted mono" style={{ fontSize: 11 }}>Config performance</div>
+            <h2 className="mono" style={{ fontSize: 18 }}>{shortId(configId)}</h2>
+          </div>
+          <button className="icon-btn" type="button" onClick={onClose} aria-label="Close config details">
+            <X size={18} />
+          </button>
+        </div>
+
+        <div className="config-detail-grid" style={{ marginBottom: 16 }}>
+          <StatLine label="Signals" value={configSignals.length} />
+          <StatLine label="Closed" value={closed.length} />
+          <StatLine label="Wins" value={closed.filter((signal) => signal.outcome === 'WIN').length} tone="good" />
+          <StatLine label="Losses" value={closed.filter((signal) => signal.outcome === 'LOSS').length} tone="bad" />
+        </div>
+
+        <MetricLineChart points={equityPoints} baseline={0} segmented height={170} />
+
+        <div style={{ overflowX: 'auto', marginTop: 16 }}>
+          <table className="data-table compact-table">
+            <thead>
+              <tr>
+                <th>Generated</th>
+                <th>Side</th>
+                <th>Status</th>
+                <th>Outcome</th>
+                <th>PnL</th>
+                <th>Close</th>
+              </tr>
+            </thead>
+            <tbody>
+              {configSignals.map((signal) => (
+                <tr key={signal.shadow_signal_id}>
+                  <td className="mono">{formatDate(signal.generated_at)}</td>
+                  <td><span className={`badge ${signal.side === 'LONG' ? 'badge-buy' : 'badge-sell'}`}>{signal.side || '-'}</span></td>
+                  <td><span className={`badge ${statusClass(signal.status)}`}>{signal.status}</span></td>
+                  <td className={outcomeClass(signal.outcome)}>{signal.outcome || '-'}</td>
+                  <td className={Number(signal.pnl_pct) >= 0 ? 'text-green' : 'text-red'}>{formatPct(signal.pnl_pct, 4)}</td>
+                  <td className="mono">{formatDate(getSignalCloseTime(signal))}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </aside>
+    </div>
   )
 }
 
@@ -528,14 +858,43 @@ function CycleDiagnostics({ cycles }) {
   )
 }
 
-function SignalsTable({ signals }) {
+function SignalsTable({ signals, onOpenConfig }) {
+  const [filters, setFilters] = useState({ symbol: '', outcome: '', configId: '' })
+  const [expandedId, setExpandedId] = useState('')
+  const symbols = useMemo(() => Array.from(new Set(signals.map((signal) => signal.symbol).filter(Boolean))).sort(), [signals])
+  const outcomes = useMemo(() => Array.from(new Set(signals.map((signal) => signal.outcome).filter(Boolean))).sort(), [signals])
+  const configs = useMemo(() => Array.from(new Set(signals.map((signal) => signal.config_id).filter(Boolean))).sort(), [signals])
+  const filteredSignals = useMemo(() => {
+    return signals.filter((signal) => {
+      if (filters.symbol && signal.symbol !== filters.symbol) return false
+      if (filters.outcome && signal.outcome !== filters.outcome) return false
+      if (filters.configId && signal.config_id !== filters.configId) return false
+      return true
+    })
+  }, [filters, signals])
+
   return (
     <section className="card">
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginBottom: 12 }}>
         <h2 className="mono" style={{ fontSize: 15 }}>Recent Shadow Signals</h2>
-        <span className="text-muted mono" style={{ fontSize: 11 }}>{signals.length} rows</span>
+        <span className="text-muted mono" style={{ fontSize: 11 }}>{filteredSignals.length} / {signals.length} rows</span>
       </div>
-      {signals.length === 0 ? (
+      <div className="table-filters">
+        <select value={filters.symbol} onChange={(event) => setFilters((current) => ({ ...current, symbol: event.target.value }))}>
+          <option value="">All symbols</option>
+          {symbols.map((symbol) => <option key={symbol} value={symbol}>{symbol}</option>)}
+        </select>
+        <select value={filters.outcome} onChange={(event) => setFilters((current) => ({ ...current, outcome: event.target.value }))}>
+          <option value="">All outcomes</option>
+          {outcomes.map((outcome) => <option key={outcome} value={outcome}>{outcome}</option>)}
+        </select>
+        <select value={filters.configId} onChange={(event) => setFilters((current) => ({ ...current, configId: event.target.value }))}>
+          <option value="">All configs</option>
+          {configs.map((config) => <option key={config} value={config}>{shortId(config)}</option>)}
+        </select>
+      </div>
+
+      {filteredSignals.length === 0 ? (
         <div className="text-muted">No shadow signals found.</div>
       ) : (
         <div style={{ overflowX: 'auto' }}>
@@ -559,25 +918,64 @@ function SignalsTable({ signals }) {
               </tr>
             </thead>
             <tbody>
-              {signals.map((signal) => {
+              {filteredSignals.map((signal) => {
                 const review = signal.agent_review || {}
+                const features = signal.input_features || signal.raw?.input_features || {}
+                const market = signal.market_context || signal.raw?.market_context || {}
+                const news = signal.news_context || signal.raw?.news_context || {}
+                const closeHours = hoursBetween(signal.generated_at, getSignalCloseTime(signal))
+                const expanded = expandedId === signal.shadow_signal_id
                 return (
-                  <tr key={signal.shadow_signal_id}>
-                    <td className="mono">{formatDate(signal.generated_at)}</td>
-                    <td className="mono">{signal.symbol}</td>
-                    <td><span className={`badge ${signal.side === 'LONG' ? 'badge-buy' : 'badge-sell'}`}>{signal.side || '-'}</span></td>
-                    <td><span className={`badge ${statusClass(signal.status)}`}>{signal.status}</span></td>
-                    <td className={outcomeClass(signal.outcome)}>{signal.outcome || '-'}</td>
-                    <td>{formatNumber(signal.entry_price, 6)}</td>
-                    <td>{formatNumber(signal.stop_loss, 6)}</td>
-                    <td>{formatNumber(signal.take_profit, 6)}</td>
-                    <td className={Number(signal.pnl_pct) >= 0 ? 'text-green' : 'text-red'}>{formatPct(signal.pnl_pct, 4)}</td>
-                    <td className="mono">{formatDate(signal.expires_at)}</td>
-                    <td>{formatPct(signal.confidence)}</td>
-                    <td>{signal.horizon_candles || '-'}c / {signal.horizon_minutes || '-'}m</td>
-                    <td>{review.review_status || '-'}</td>
-                    <td className="mono">{shortId(signal.config_id)}</td>
-                  </tr>
+                  <Fragment key={signal.shadow_signal_id}>
+                    <tr
+                      className={expanded ? 'selected-row expandable-row' : 'expandable-row'}
+                      onClick={() => setExpandedId(expanded ? '' : signal.shadow_signal_id)}
+                    >
+                      <td className="mono">{formatDate(signal.generated_at)}</td>
+                      <td className="mono">{signal.symbol}</td>
+                      <td><span className={`badge ${signal.side === 'LONG' ? 'badge-buy' : 'badge-sell'}`}>{signal.side || '-'}</span></td>
+                      <td><span className={`badge ${statusClass(signal.status)}`}>{signal.status}</span></td>
+                      <td className={outcomeClass(signal.outcome)}>{signal.outcome || '-'}</td>
+                      <td>{formatNumber(signal.entry_price, 6)}</td>
+                      <td>{formatNumber(signal.stop_loss, 6)}</td>
+                      <td>{formatNumber(signal.take_profit, 6)}</td>
+                      <td className={Number(signal.pnl_pct) >= 0 ? 'text-green' : 'text-red'}>{formatPct(signal.pnl_pct, 4)}</td>
+                      <td className="mono">{formatDate(signal.expires_at)}</td>
+                      <td>{formatPct(signal.confidence)}</td>
+                      <td>{signal.horizon_candles || '-'}c / {signal.horizon_minutes || '-'}m</td>
+                      <td>{review.review_status || '-'}</td>
+                      <td>
+                        <button
+                          className="table-link mono"
+                          type="button"
+                          onClick={(event) => {
+                            event.stopPropagation()
+                            onOpenConfig(signal.config_id)
+                          }}
+                        >
+                          {shortId(signal.config_id)}
+                        </button>
+                      </td>
+                    </tr>
+                    {expanded && (
+                      <tr className="signal-detail-row">
+                        <td colSpan={14}>
+                          <div className="signal-detail-grid">
+                            <StatLine label="Buy probability" value={formatProbability(features.probability_buy_win, 2)} />
+                            <StatLine label="Sell probability" value={formatProbability(features.probability_sell_win, 2)} />
+                            <StatLine label="Hours to close" value={closeHours === null ? '-' : formatNumber(closeHours, 2)} />
+                            <StatLine label="Close time" value={formatDate(getSignalCloseTime(signal))} />
+                            <StatLine label="Market context" value={market.context_status || market.review_status || market.trend || '-'} />
+                            <StatLine label="News context" value={news.context_status || news.provider_status || news.sentiment || '-'} />
+                          </div>
+                          <div className="detail-tags">
+                            {compactEntries(market).map(([key, value]) => <span className="tag" key={`market-${key}`}>market.{key}: {String(value)}</span>)}
+                            {compactEntries(features).map(([key, value]) => <span className="tag" key={`feature-${key}`}>feature.{key}: {String(value)}</span>)}
+                          </div>
+                        </td>
+                      </tr>
+                    )}
+                  </Fragment>
                 )
               })}
             </tbody>
@@ -591,6 +989,7 @@ function SignalsTable({ signals }) {
 export default function ShadowSignalsPage() {
   const [state, setState] = useState({ loading: true, error: '', health: null, summary: null, signals: [], cycles: [] })
   const [selectedConfig, setSelectedConfig] = useState('')
+  const [configDrawerId, setConfigDrawerId] = useState('')
 
   async function load() {
     setState((current) => ({ ...current, loading: true, error: '' }))
@@ -598,7 +997,7 @@ export default function ShadowSignalsPage() {
       const [health, summary, signals, cycles] = await Promise.all([
         api.shadow.health(),
         api.shadow.summary(),
-        api.shadow.signals({ limit: 50 }),
+        api.shadow.signals({ limit: 200 }),
         api.shadow.cycles({ limit: 20 }),
       ])
       setState({
@@ -634,6 +1033,7 @@ export default function ShadowSignalsPage() {
   const latestSignal = sortedSignals[0] || null
   const configRows = useMemo(() => buildConfigRows(sortedSignals, state.summary?.by_config || {}), [sortedSignals, state.summary])
   const confidenceBuckets = useMemo(() => buildConfidenceBuckets(sortedSignals), [sortedSignals])
+  const cycleIssue = useMemo(() => getCycleIssues(state.cycles?.[0]), [state.cycles])
 
   useEffect(() => {
     if (configRows.length === 0) {
@@ -679,6 +1079,7 @@ export default function ShadowSignalsPage() {
       {!state.loading && !state.error && (
         <>
           <GuardrailStrip health={state.health} />
+          <CycleWarningBanner issue={cycleIssue} />
           <div className="kpi-grid">
             <Kpi label="Open" value={summary.open ?? 0} tone={latestOpen.length > 0 ? 'warn' : 'neutral'} />
             <Kpi label="Closed" value={summary.closed ?? 0} />
@@ -696,8 +1097,10 @@ export default function ShadowSignalsPage() {
 
           <div className="shadow-grid">
             <SymbolSummary bySymbol={state.summary?.by_symbol || {}} />
-            <ConfigSummary byConfig={state.summary?.by_config || {}} />
+            <ConfigSummary byConfig={state.summary?.by_config || {}} onOpenConfig={setConfigDrawerId} />
           </div>
+
+          <PerformanceCharts signals={sortedSignals} />
 
           <ConfigDeepDive
             configRows={configRows}
@@ -732,7 +1135,8 @@ export default function ShadowSignalsPage() {
             </section>
           </div>
 
-          <SignalsTable signals={sortedSignals} />
+          <SignalsTable signals={sortedSignals} onOpenConfig={setConfigDrawerId} />
+          <ConfigSignalsDrawer configId={configDrawerId} signals={sortedSignals} onClose={() => setConfigDrawerId('')} />
         </>
       )}
     </>
