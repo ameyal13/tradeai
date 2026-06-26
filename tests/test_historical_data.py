@@ -24,10 +24,13 @@ def raw_rows(start: int, count: int) -> list[list[str]]:
 
 
 class FakeResponse:
-    def __init__(self, rows):
+    def __init__(self, rows, error=None):
         self._rows = rows
+        self._error = error
 
     def raise_for_status(self):
+        if self._error:
+            raise self._error
         return None
 
     def json(self):
@@ -37,6 +40,7 @@ class FakeResponse:
 class FakeAsyncClient:
     pages: list[list[list[str]]] = []
     requests: list[dict] = []
+    urls: list[str] = []
 
     def __init__(self, *args, **kwargs):
         pass
@@ -48,7 +52,19 @@ class FakeAsyncClient:
         return None
 
     async def get(self, url, params):
+        self.__class__.urls.append(url)
         self.__class__.requests.append(dict(params))
+        return FakeResponse(self.__class__.pages.pop(0))
+
+
+class FallbackAsyncClient(FakeAsyncClient):
+    primary_error: Exception = RuntimeError("HTTP 451")
+
+    async def get(self, url, params):
+        self.__class__.urls.append(url)
+        self.__class__.requests.append(dict(params))
+        if "api.binance.com" in url:
+            return FakeResponse([], error=self.__class__.primary_error)
         return FakeResponse(self.__class__.pages.pop(0))
 
 
@@ -109,6 +125,7 @@ class HistoricalDataTests(unittest.TestCase):
         older = raw_rows(0, 500)
         FakeAsyncClient.pages = [latest, older]
         FakeAsyncClient.requests = []
+        FakeAsyncClient.urls = []
 
         async def run():
             with patch("httpx.AsyncClient", FakeAsyncClient):
@@ -123,12 +140,28 @@ class HistoricalDataTests(unittest.TestCase):
         self.assertEqual(FakeAsyncClient.requests[1]["limit"], 500)
         self.assertEqual(FakeAsyncClient.requests[1]["endTime"], latest[0][0] - 1)
 
+    def test_fetch_binance_falls_back_to_market_data_host(self):
+        FallbackAsyncClient.pages = [raw_rows(0, 3)]
+        FallbackAsyncClient.requests = []
+        FallbackAsyncClient.urls = []
+
+        async def run():
+            with patch("httpx.AsyncClient", FallbackAsyncClient):
+                return await fetch_binance_klines("ADA", "1h", limit=3, retries=0)
+
+        df = __import__("asyncio").run(run())
+
+        self.assertEqual(len(df), 3)
+        self.assertIn("api.binance.com", FallbackAsyncClient.urls[0])
+        self.assertIn("data-api.binance.vision", FallbackAsyncClient.urls[1])
+
     def test_fetch_binance_dedupes_orders_and_does_not_exceed_limit(self):
         latest = raw_rows(500 * 60_000, 1000)
         older = raw_rows(0, 501)
         older[-1] = latest[0]
         FakeAsyncClient.pages = [latest, older]
         FakeAsyncClient.requests = []
+        FakeAsyncClient.urls = []
 
         async def run():
             with patch("httpx.AsyncClient", FakeAsyncClient):
@@ -143,6 +176,7 @@ class HistoricalDataTests(unittest.TestCase):
     def test_fetch_binance_limit_under_1000_keeps_single_latest_request(self):
         FakeAsyncClient.pages = [raw_rows(0, 500)]
         FakeAsyncClient.requests = []
+        FakeAsyncClient.urls = []
 
         async def run():
             with patch("httpx.AsyncClient", FakeAsyncClient):

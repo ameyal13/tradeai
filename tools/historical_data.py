@@ -12,6 +12,8 @@ import pandas as pd
 
 
 BINANCE_BASE = "https://api.binance.com/api/v3"
+BINANCE_DATA_API_BASE = "https://data-api.binance.vision/api/v3"
+BINANCE_KLINE_BASES = [BINANCE_BASE, BINANCE_DATA_API_BASE]
 SYMBOL_MAP = {
     "BTC": "BTCUSDT",
     "ETH": "ETHUSDT",
@@ -160,7 +162,12 @@ async def fetch_binance_klines(
     retries: int = 3,
     backoff_seconds: float = 0.5,
 ) -> pd.DataFrame:
-    """Fetch Binance klines with pagination beyond the 1000-candle API limit."""
+    """Fetch Binance klines with pagination beyond the 1000-candle API limit.
+
+    The primary Spot REST host can return HTTP 451 from some cloud regions. When
+    that happens, retry the same public market-data request against Binance's
+    market-data-only host before failing the whole fetch.
+    """
     import httpx
 
     ticker = binance_symbol(symbol)
@@ -171,53 +178,59 @@ async def fetch_binance_klines(
     use_backward_latest_pagination = limit > 1000 and start_ms is None
 
     for attempt in range(attempts):
-        remaining = limit
-        all_rows: list[list[Any]] = []
-        next_start = start_ms
-        next_end = end_ms
         try:
             async with httpx.AsyncClient(timeout=30) as client:
-                while remaining > 0:
-                    page_limit = min(1000, remaining)
-                    params: dict[str, Any] = {"symbol": ticker, "interval": interval, "limit": page_limit}
-                    if use_backward_latest_pagination:
-                        if next_end is not None:
-                            params["endTime"] = next_end
-                    else:
-                        if next_start is not None:
-                            params["startTime"] = next_start
-                        if end_ms is not None:
-                            params["endTime"] = end_ms
-                    response = await client.get(f"{BINANCE_BASE}/klines", params=params)
-                    response.raise_for_status()
-                    rows = response.json()
-                    if not rows:
-                        break
-                    all_rows.extend(rows)
-                    remaining -= len(rows)
-                    if use_backward_latest_pagination:
-                        earliest_open = int(rows[0][0])
-                        next_end = earliest_open - 1
-                        if next_end <= 0 or len(rows) < page_limit:
-                            break
-                    else:
-                        last_open = int(rows[-1][0])
-                        next_start = last_open + 1
-                        if len(rows) < page_limit or (end_ms is not None and last_open >= end_ms):
-                            break
-            df = normalize_klines(all_rows)
-            df = df.tail(limit).reset_index(drop=True) if use_backward_latest_pagination else df.head(limit).reset_index(drop=True)
-            if df.empty:
-                raise HistoricalDataError("empty_data", f"Binance returned no OHLCV rows for {ticker} {interval}")
-            return df
+                for base_url in BINANCE_KLINE_BASES:
+                    remaining = limit
+                    all_rows: list[list[Any]] = []
+                    next_start = start_ms
+                    next_end = end_ms
+                    try:
+                        while remaining > 0:
+                            page_limit = min(1000, remaining)
+                            params: dict[str, Any] = {"symbol": ticker, "interval": interval, "limit": page_limit}
+                            if use_backward_latest_pagination:
+                                if next_end is not None:
+                                    params["endTime"] = next_end
+                            else:
+                                if next_start is not None:
+                                    params["startTime"] = next_start
+                                if end_ms is not None:
+                                    params["endTime"] = end_ms
+                            response = await client.get(f"{base_url}/klines", params=params)
+                            response.raise_for_status()
+                            rows = response.json()
+                            if not rows:
+                                break
+                            all_rows.extend(rows)
+                            remaining -= len(rows)
+                            if use_backward_latest_pagination:
+                                earliest_open = int(rows[0][0])
+                                next_end = earliest_open - 1
+                                if next_end <= 0 or len(rows) < page_limit:
+                                    break
+                            else:
+                                last_open = int(rows[-1][0])
+                                next_start = last_open + 1
+                                if len(rows) < page_limit or (end_ms is not None and last_open >= end_ms):
+                                    break
+                        df = normalize_klines(all_rows)
+                        df = df.tail(limit).reset_index(drop=True) if use_backward_latest_pagination else df.head(limit).reset_index(drop=True)
+                        if df.empty:
+                            raise HistoricalDataError("empty_data", f"Binance returned no OHLCV rows for {ticker} {interval}")
+                        return df
+                    except Exception as exc:  # noqa: BLE001 - try alternate public endpoint before retrying.
+                        last_error = exc
+                        continue
         except Exception as exc:  # noqa: BLE001 - API boundary needs typed retry diagnostics.
             last_error = exc
-            if attempt < attempts - 1:
-                await asyncio.sleep(backoff_seconds * (2 ** attempt))
+        if attempt < attempts - 1:
+            await asyncio.sleep(backoff_seconds * (2 ** attempt))
 
     category = classify_historical_data_error(last_error or RuntimeError("unknown historical data error"))
     raise HistoricalDataError(
         category,
-        f"Failed to fetch Binance klines for {ticker} {interval} after {attempts} attempt(s): {last_error}",
+        f"Failed to fetch Binance klines for {ticker} {interval} after {attempts} attempt(s) "
+        f"across {len(BINANCE_KLINE_BASES)} endpoint(s): {last_error}",
         original=last_error,
     )
