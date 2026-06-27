@@ -6,6 +6,8 @@ from unittest.mock import AsyncMock, patch
 
 from research.telegram_notifier import (
     format_autopilot_summary_for_telegram,
+    format_shadow_ops_cycle_brief,
+    format_shadow_daily_summary,
     send_telegram_message,
     telegram_enabled,
 )
@@ -70,6 +72,50 @@ class TelegramNotifierTests(unittest.TestCase):
         with patch.dict(os.environ, {"TELEGRAM_BOT_TOKEN": "token", "TELEGRAM_CHAT_ID": "chat"}, clear=True):
             with patch("research.telegram_notifier.httpx.post", side_effect=RuntimeError("network down")):
                 self.assertFalse(send_telegram_message("hello"))
+
+    def test_shadow_ops_cycle_brief_explains_research_status(self):
+        text = format_shadow_ops_cycle_brief({
+            "health_before": {"health_status": "HEALTH_WARNING"},
+            "evaluation": {"closed": 0, "errors": [{}]},
+            "evaluation_error_summary": {"count": 1},
+            "generation_cycle": {
+                "generation_summary": {
+                    "configs_scanned": 18,
+                    "opened_signals": 0,
+                    "skipped_hold": 11,
+                    "skipped_errors": 1,
+                    "status_counts": {"skipped_no_price": 0},
+                },
+            },
+            "final_summary": {
+                "open": 0,
+                "closed": 25,
+                "wins": 5,
+                "losses": 19,
+                "expired": 1,
+                "profit_factor": 0.4148,
+                "avg_return": -0.3861,
+                "max_drawdown": 9.49,
+            },
+            "supabase_sync": {"ok": True, "reason": "supabase_first"},
+            "cycles_sync": {"ok": True, "reason": None},
+        })
+
+        self.assertIn("TRADEAI Shadow Ops", text)
+        self.assertIn("Research only. No trading signal.", text)
+        self.assertIn("PF menor a 1.0", text)
+        self.assertIn("No operar dinero real", text)
+        self.assertNotIn("secret", text.lower())
+
+    def test_shadow_daily_summary_is_human_readable(self):
+        text = format_shadow_daily_summary([
+            {"outcome": "WIN", "pnl_pct": 1.0},
+            {"outcome": "LOSS", "pnl_pct": -2.0},
+        ])
+
+        self.assertIn("TRADEAI Shadow Summary", text)
+        self.assertIn("WIN/LOSS/EXPIRED: 1/1/0", text)
+        self.assertIn("Research only. No trading signal.", text)
 
 
 class TelegramAutopilotIntegrationTests(unittest.IsolatedAsyncioTestCase):

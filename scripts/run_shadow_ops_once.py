@@ -21,7 +21,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from research.telegram_notifier import send_telegram_message  # noqa: E402
+from research.telegram_notifier import format_shadow_ops_cycle_brief, send_telegram_message  # noqa: E402
 from scripts.evaluate_shadow_signals_once import evaluate_shadow_signals_once  # noqa: E402
 from scripts.run_shadow_cycle_once import default_journal_path, default_shadow_reports_dir, run_shadow_cycle_once  # noqa: E402
 from scripts.generate_shadow_signals_once import generate_shadow_signals_once, summarize_generation_rows  # noqa: E402
@@ -574,22 +574,7 @@ async def run_shadow_ops_once(
     result["cycle_record"] = cycle_record
     result["cycles_sync"] = cycles_sync
     if notify_telegram and not dry_run:
-        text = (
-            "Shadow Ops cycle finished\n"
-            "Research only. No trading signal.\n\n"
-            f"Health: {health_before.get('health_status')}\n"
-            f"Evaluated closed: {evaluation.get('closed')}\n"
-            f"Evaluation errors: {evaluation_error_summary.get('count')}\n"
-            f"Open after evaluation: {open_after_eval}\n"
-            f"Generation skipped: {generation_skipped_reason or 'no'}\n"
-            f"Configs scanned: {(((result.get('generation_cycle') or {}).get('generation_summary') or {}).get('configs_scanned') or 0)}\n"
-            f"Final open: {(final_summary.get('summary') or {}).get('open')}\n"
-            f"Final closed: {(final_summary.get('summary') or {}).get('closed')}\n"
-            f"Supabase sync: {supabase_sync.get('ok')} ({supabase_sync.get('reason')})\n"
-            f"Cycle sync: {cycles_sync.get('ok')} ({cycles_sync.get('reason')})\n"
-            f"Markdown: {final_summary.get('markdown_path')}"
-        )
-        result["ops_telegram_sent"] = send_telegram_message(text)
+        result["ops_telegram_sent"] = send_telegram_message(format_shadow_ops_cycle_brief(result))
     else:
         result["ops_telegram_sent"] = False
     return result
