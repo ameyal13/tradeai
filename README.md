@@ -57,17 +57,23 @@ Supabase is optional for local journal/replay development because the backend ha
 
 ## Dependency Notes
 
-The stack is tested/recommended for Python 3.11. Some packages in `requirements.txt` may be future-facing or not actively used in the current code paths:
+The stack is tested/recommended for Python 3.11. Direct dependencies without
+any source import are intentionally omitted. Add a package only when a tested
+runtime path requires it; Railway does not use Celery, Redis, or an external
+scheduler in the current architecture.
 
-- `celery`
-- `redis`
-- `pydantic-settings`
-- `langchain-community`
-- `python-jose[cryptography]`
-- `beautifulsoup4`
-- `aiohttp`
+## Shadow Live Performance Audit
 
-These were not removed in this stabilization pass to avoid accidental breakage.
+Railway writes shadow signals and outcomes directly to Supabase. Run the
+read-only live audit with:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\analyze_shadow_live_performance.py --source supabase
+```
+
+The report is saved under `reports/shadow/`. It compares live shadow outcomes
+by symbol, side, config, confidence, and review status. It never writes to
+Supabase, changes a model, or generates a signal.
 
 ## Manual Real-Market Smoke
 
