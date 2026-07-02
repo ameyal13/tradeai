@@ -1,8 +1,10 @@
 import unittest
+from datetime import datetime, timezone
+from unittest.mock import AsyncMock, patch
 
 import pandas as pd
 
-from tools.prediction_journal import evaluate_prediction_against_candles, normalize_prediction
+from tools.prediction_journal import evaluate_prediction_against_candles, fetch_future_klines, normalize_prediction
 
 
 def make_prediction(signal="BUY", **overrides):
@@ -257,6 +259,35 @@ class PredictionOutcomeTests(unittest.TestCase):
         )
 
         self.assertLess(with_spread["return_pct"], no_spread["return_pct"])
+
+
+class PredictionMarketDataTests(unittest.IsolatedAsyncioTestCase):
+    async def test_future_klines_use_shared_cloud_compatible_loader(self):
+        start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        end = datetime(2026, 1, 1, 1, tzinfo=timezone.utc)
+        frame = pd.DataFrame([{
+            "timestamp": "2026-01-01T01:00:00Z",
+            "open": 100,
+            "high": 101,
+            "low": 99,
+            "close": 100.5,
+            "volume": 10,
+        }])
+
+        with patch("tools.prediction_journal.fetch_binance_klines", new=AsyncMock(return_value=frame)) as fetch:
+            result = await fetch_future_klines("SOL", "1h", start, end)
+
+        fetch.assert_awaited_once_with(
+            "SOL",
+            "1h",
+            start_time=start,
+            end_time=end,
+            limit=1000,
+            retries=1,
+            backoff_seconds=0.5,
+        )
+        self.assertEqual(len(result), 1)
+        self.assertEqual(str(result.index.tz), "UTC")
 
 
 if __name__ == "__main__":

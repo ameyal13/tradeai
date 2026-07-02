@@ -15,27 +15,14 @@ from uuid import uuid4
 import numpy as np
 import pandas as pd
 
+from tools.historical_data import fetch_binance_klines
+
 
 VALID_SIGNALS = {"BUY", "SELL", "HOLD"}
 VALID_MODES = {"deterministic", "model_based", "hybrid", "xgboost"}
 PENDING = "pending"
 EVALUATED = "evaluated"
 INVALID = "invalid"
-
-BINANCE_BASE = "https://api.binance.com/api/v3"
-SYMBOL_MAP = {
-    "BTC": "BTCUSDT",
-    "ETH": "ETHUSDT",
-    "BNB": "BNBUSDT",
-    "SOL": "SOLUSDT",
-    "XRP": "XRPUSDT",
-    "ADA": "ADAUSDT",
-    "DOGE": "DOGEUSDT",
-    "AVAX": "AVAXUSDT",
-    "LINK": "LINKUSDT",
-    "DOT": "DOTUSDT",
-}
-
 
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
@@ -335,33 +322,19 @@ def candles_to_raw_path(path: pd.DataFrame) -> list[dict[str, Any]]:
 
 
 async def fetch_future_klines(symbol: str, timeframe: str, start: datetime, end: datetime) -> pd.DataFrame:
-    """Fetch Binance candles after prediction time for outcome evaluation."""
-    import httpx
-
-    ticker = SYMBOL_MAP.get(symbol.upper(), symbol.upper() + "USDT")
-    async with httpx.AsyncClient(timeout=20) as client:
-        response = await client.get(
-            f"{BINANCE_BASE}/klines",
-            params={
-                "symbol": ticker,
-                "interval": timeframe,
-                "startTime": int(start.timestamp() * 1000),
-                "endTime": int(end.timestamp() * 1000),
-                "limit": 1000,
-            },
-        )
-        response.raise_for_status()
-        raw = response.json()
-
-    df = pd.DataFrame(raw, columns=[
-        "open_time", "open", "high", "low", "close", "volume",
-        "close_time", "quote_volume", "trades", "taker_buy_base",
-        "taker_buy_quote", "ignore",
-    ])
-    if df.empty:
+    """Fetch future candles through the shared cloud-compatible data layer."""
+    candles = await fetch_binance_klines(
+        symbol,
+        timeframe,
+        start_time=start,
+        end_time=end,
+        limit=1000,
+        retries=1,
+        backoff_seconds=0.5,
+    )
+    if candles.empty:
         return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
-    df["open_time"] = pd.to_datetime(df["open_time"], unit="ms", utc=True)
-    return normalize_ohlcv(df[["open_time", "open", "high", "low", "close", "volume"]])
+    return normalize_ohlcv(candles)
 
 
 class PredictionStore:
