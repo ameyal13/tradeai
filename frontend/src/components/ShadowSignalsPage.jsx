@@ -1,6 +1,6 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import { createChart, LineStyle } from 'lightweight-charts'
-import { Activity, AlertTriangle, Clock, Database, RefreshCw, ShieldCheck, TrendingUp, X } from 'lucide-react'
+import { Activity, AlertTriangle, Clock, Database, RefreshCw, ShieldCheck, Target, TrendingUp, X } from 'lucide-react'
 import { api } from '../lib/api.js'
 
 function formatNumber(value, digits = 2) {
@@ -165,6 +165,74 @@ function getCycleIssues(cycle) {
   }
 }
 
+function signalKey(signal) {
+  return signal?.shadow_signal_id || `${signal?.config_id || 'unknown'}-${signal?.generated_at || ''}`
+}
+
+function getCandles(marketData) {
+  return Array.isArray(marketData?.candles) ? marketData.candles : []
+}
+
+function estimateMarketLevels(candles) {
+  const recent = candles.slice(-24)
+  if (!recent.length) return { support: null, resistance: null, rangePct: null, volumeRatio: null }
+  const lows = recent.map((candle) => toFiniteNumber(candle.low)).filter((value) => value !== null)
+  const highs = recent.map((candle) => toFiniteNumber(candle.high)).filter((value) => value !== null)
+  const closes = recent.map((candle) => toFiniteNumber(candle.close)).filter((value) => value !== null)
+  const volumes = recent.map((candle) => toFiniteNumber(candle.volume)).filter((value) => value !== null)
+  const lastClose = closes[closes.length - 1] || null
+  const support = lows.length ? Math.min(...lows) : null
+  const resistance = highs.length ? Math.max(...highs) : null
+  const rangePct = support && resistance && lastClose ? ((resistance - support) / lastClose) * 100 : null
+  const avgVolume = volumes.length ? volumes.reduce((acc, value) => acc + value, 0) / volumes.length : null
+  const volumeRatio = avgVolume && volumes.length ? volumes[volumes.length - 1] / avgVolume : null
+  return { support, resistance, rangePct, volumeRatio }
+}
+
+function intervalTone(marketData) {
+  const analysis = marketData?.analysis || {}
+  const indicators = marketData?.indicators || {}
+  const macd = analysis.macd_signal || (toNumber(indicators.macd_hist) >= 0 ? 'BULLISH' : 'BEARISH')
+  const rsi = toFiniteNumber(indicators.rsi)
+  if (macd === 'BULLISH' && (rsi === null || rsi < 72)) return 'bullish'
+  if (macd === 'BEARISH' && (rsi === null || rsi > 28)) return 'bearish'
+  return 'neutral'
+}
+
+function alignmentForSide(side, tone) {
+  if (side === 'LONG') return tone === 'bullish'
+  if (side === 'SHORT') return tone === 'bearish'
+  return false
+}
+
+function buildDecisionRead(signal, marketByInterval) {
+  if (!signal) return null
+  const intervals = ['15m', '1h', '4h']
+  const tones = intervals.map((interval) => ({
+    interval,
+    tone: intervalTone(marketByInterval[interval]),
+    aligned: alignmentForSide(signal.side, intervalTone(marketByInterval[interval])),
+  }))
+  const loaded = tones.filter((item) => marketByInterval[item.interval])
+  const alignedCount = loaded.filter((item) => item.aligned).length
+  const bearishCount = loaded.filter((item) => item.tone === 'bearish').length
+  const bullishCount = loaded.filter((item) => item.tone === 'bullish').length
+  const direction = signal.side === 'LONG' ? 'compradora' : signal.side === 'SHORT' ? 'vendedora' : 'neutral'
+  let label = 'Sin suficiente contexto'
+  let tone = 'warn'
+  if (loaded.length >= 2 && alignedCount >= 2) {
+    label = `Contexto multi-timeframe alineado con la idea ${direction}`
+    tone = 'good'
+  } else if (loaded.length >= 2 && alignedCount === 0) {
+    label = `Contexto multi-timeframe contradice la idea ${direction}`
+    tone = 'bad'
+  } else if (loaded.length) {
+    label = `Contexto mixto: ${bullishCount} bullish / ${bearishCount} bearish`
+    tone = 'warn'
+  }
+  return { label, tone, tones, alignedCount, loadedCount: loaded.length }
+}
+
 function statusClass(status) {
   if (status === 'OPEN') return 'badge-medium'
   if (status === 'CLOSED') return 'badge-low'
@@ -311,6 +379,321 @@ function PerformanceCharts({ signals }) {
         <span className="text-muted mono" style={{ fontSize: 11 }}>last 10 closed signals</span>
       </div>
       <MetricLineChart points={rollingPfPoints} baseline={1} height={180} positiveAboveZero />
+    </section>
+  )
+}
+
+function StrategyEvidenceStrip({ strategySummary, technicalExclusions, exclusionsByReason }) {
+  const exclusions = Number(technicalExclusions || 0)
+  const reasons = Object.entries(exclusionsByReason || {})
+  return (
+    <section className="strategy-evidence-strip">
+      <div>
+        <div className="mono strategy-evidence-title">Strategy-evaluable outcomes</div>
+        <div className="text-muted" style={{ fontSize: 12 }}>
+          Excludes technical expirations such as old evaluation HTTP errors. This is the cleaner signal-quality metric.
+        </div>
+      </div>
+      <div className="strategy-evidence-metrics">
+        <StatLine label="Valid closed" value={strategySummary?.closed ?? 0} />
+        <StatLine label="W/L" value={`${strategySummary?.wins ?? 0}/${strategySummary?.losses ?? 0}`} />
+        <StatLine label="Strategy PF" value={formatNumber(strategySummary?.profit_factor, 4)} tone={Number(strategySummary?.profit_factor) > 1 ? 'good' : 'warn'} />
+        <StatLine label="Avg return" value={formatPct(strategySummary?.avg_return, 4)} tone={Number(strategySummary?.avg_return) > 0 ? 'good' : 'bad'} />
+        <StatLine label="Technical exclusions" value={exclusions} tone={exclusions > 0 ? 'warn' : 'neutral'} />
+      </div>
+      {reasons.length > 0 && (
+        <div className="tag-row">
+          {reasons.map(([reason, count]) => <span className="tag" key={reason}>{reason}: {String(count)}</span>)}
+        </div>
+      )}
+    </section>
+  )
+}
+
+function SignalPriceChart({ marketData, signal, interval, height = 360 }) {
+  const containerRef = useRef(null)
+  const candles = useMemo(() => getCandles(marketData), [marketData])
+
+  useEffect(() => {
+    if (!containerRef.current) return undefined
+    const chart = createChart(containerRef.current, {
+      height,
+      layout: {
+        background: { color: 'transparent' },
+        textColor: '#5a6a7a',
+        fontFamily: 'IBM Plex Mono',
+      },
+      grid: {
+        vertLines: { color: 'rgba(42,51,64,0.35)' },
+        horzLines: { color: 'rgba(42,51,64,0.35)' },
+      },
+      rightPriceScale: {
+        borderColor: 'rgba(42,51,64,0.65)',
+      },
+      timeScale: {
+        borderColor: 'rgba(42,51,64,0.65)',
+        timeVisible: true,
+        secondsVisible: false,
+      },
+      crosshair: {
+        vertLine: { color: 'rgba(90,106,122,0.35)' },
+        horzLine: { color: 'rgba(90,106,122,0.35)' },
+      },
+    })
+
+    if (candles.length) {
+      const series = chart.addCandlestickSeries({
+        upColor: '#00d4a0',
+        downColor: '#ff4d6a',
+        borderUpColor: '#00d4a0',
+        borderDownColor: '#ff4d6a',
+        wickUpColor: '#00d4a0',
+        wickDownColor: '#ff4d6a',
+      })
+      series.setData(candles.map((candle) => ({
+        time: candle.time,
+        open: Number(candle.open),
+        high: Number(candle.high),
+        low: Number(candle.low),
+        close: Number(candle.close),
+      })))
+
+      const levels = [
+        { label: 'ENTRY', value: toFiniteNumber(signal?.entry_price), color: '#4090ff', style: LineStyle.Solid },
+        { label: 'SL', value: toFiniteNumber(signal?.stop_loss), color: '#ff4d6a', style: LineStyle.Dashed },
+        { label: 'TP', value: toFiniteNumber(signal?.take_profit), color: '#00d4a0', style: LineStyle.Dashed },
+      ]
+      for (const level of levels) {
+        if (level.value !== null) {
+          series.createPriceLine({
+            price: level.value,
+            color: level.color,
+            lineWidth: 1,
+            lineStyle: level.style,
+            axisLabelVisible: true,
+            title: level.label,
+          })
+        }
+      }
+
+      const generatedAt = signal?.generated_at ? Math.floor(new Date(signal.generated_at).getTime() / 1000) : null
+      if (generatedAt) {
+        const nearest = candles.reduce((winner, candle) => {
+          if (!winner) return candle
+          return Math.abs(candle.time - generatedAt) < Math.abs(winner.time - generatedAt) ? candle : winner
+        }, null)
+        if (nearest) {
+          series.setMarkers([{
+            time: nearest.time,
+            position: signal?.side === 'SHORT' ? 'aboveBar' : 'belowBar',
+            color: signal?.side === 'SHORT' ? '#ff4d6a' : '#00d4a0',
+            shape: signal?.side === 'SHORT' ? 'arrowDown' : 'arrowUp',
+            text: `${signal?.side || 'SIGNAL'} ${shortId(signal?.config_id)}`,
+          }])
+        }
+      }
+
+      chart.timeScale().fitContent()
+    }
+
+    const resize = () => {
+      if (containerRef.current) {
+        chart.applyOptions({ width: containerRef.current.clientWidth })
+      }
+    }
+    resize()
+    window.addEventListener('resize', resize)
+    return () => {
+      window.removeEventListener('resize', resize)
+      chart.remove()
+    }
+  }, [candles, signal, interval, height])
+
+  if (!candles.length) {
+    return (
+      <div className="chart-empty" style={{ minHeight: height }}>
+        <span className="text-muted">No candle data for {interval} yet.</span>
+      </div>
+    )
+  }
+
+  return <div className="price-chart" ref={containerRef} style={{ height }} />
+}
+
+function TimeframeContextCard({ interval, marketData, signal }) {
+  const indicators = marketData?.indicators || {}
+  const analysis = marketData?.analysis || {}
+  const candles = getCandles(marketData)
+  const levels = estimateMarketLevels(candles)
+  const tone = intervalTone(marketData)
+  const aligned = signal ? alignmentForSide(signal.side, tone) : false
+  return (
+    <section className={`timeframe-card ${aligned ? 'timeframe-aligned' : ''}`}>
+      <div className="timeframe-head">
+        <span className="mono">{interval}</span>
+        <span className={`badge ${tone === 'bullish' ? 'badge-buy' : tone === 'bearish' ? 'badge-sell' : 'badge-hold'}`}>
+          {tone}
+        </span>
+      </div>
+      {!marketData ? (
+        <div className="text-muted">Loading...</div>
+      ) : (
+        <div className="stack">
+          <StatLine label="Price" value={formatNumber(indicators.price, 6)} />
+          <StatLine label="RSI" value={formatNumber(indicators.rsi, 2)} tone={analysis.rsi_signal === 'OVERBOUGHT' ? 'warn' : analysis.rsi_signal === 'OVERSOLD' ? 'good' : 'neutral'} />
+          <StatLine label="MACD" value={analysis.macd_signal || '-'} tone={analysis.macd_signal === 'BULLISH' ? 'good' : 'bad'} />
+          <StatLine label="BB" value={analysis.bb_position || '-'} />
+          <StatLine label="Support" value={formatNumber(levels.support, 6)} />
+          <StatLine label="Resistance" value={formatNumber(levels.resistance, 6)} />
+          <StatLine label="Volume ratio" value={formatNumber(levels.volumeRatio, 2)} tone={levels.volumeRatio > 1.2 ? 'good' : 'neutral'} />
+        </div>
+      )}
+    </section>
+  )
+}
+
+function SignalDecisionView({ signals, selectedSignalId, onSelectSignal }) {
+  const [interval, setInterval] = useState('1h')
+  const [marketState, setMarketState] = useState({ loading: false, error: '', data: {} })
+  const signal = useMemo(() => {
+    if (!signals.length) return null
+    return signals.find((item) => signalKey(item) === selectedSignalId) || signals.find((item) => item.status === 'OPEN') || signals[0]
+  }, [signals, selectedSignalId])
+
+  useEffect(() => {
+    if (signal?.timeframe) {
+      setInterval(signal.timeframe)
+    }
+  }, [signal?.timeframe, signalKey(signal)])
+
+  useEffect(() => {
+    if (!signal?.symbol) return undefined
+    let cancelled = false
+    const intervals = Array.from(new Set(['15m', signal.timeframe || '1h', '1h', '4h', interval]))
+    setMarketState((current) => ({ ...current, loading: true, error: '' }))
+    Promise.allSettled(intervals.map((item) => api.market.detail(signal.symbol, item).then((res) => [item, res.data])))
+      .then((results) => {
+        if (cancelled) return
+        const nextData = {}
+        const errors = []
+        for (const result of results) {
+          if (result.status === 'fulfilled') {
+            nextData[result.value[0]] = result.value[1]
+          } else {
+            errors.push(result.reason?.message || String(result.reason))
+          }
+        }
+        setMarketState({ loading: false, error: errors[0] || '', data: nextData })
+      })
+    return () => { cancelled = true }
+  }, [signal?.symbol, signal?.timeframe, signalKey(signal), interval])
+
+  const decision = useMemo(() => buildDecisionRead(signal, marketState.data), [signal, marketState.data])
+  const selectedMarket = marketState.data[interval] || marketState.data[signal?.timeframe || '1h'] || null
+  const selectedLevels = estimateMarketLevels(getCandles(selectedMarket))
+  const features = signal?.input_features || signal?.raw?.input_features || {}
+  const review = signal?.agent_review || signal?.raw?.agent_review || {}
+  const signalOptions = signals.slice(0, 80)
+
+  if (!signal) {
+    return (
+      <section className="card decision-view">
+        <h2 className="panel-title"><Target size={15} /> Signal decision context</h2>
+        <div className="text-muted">No shadow signal available yet.</div>
+      </section>
+    )
+  }
+
+  return (
+    <section className="card decision-view">
+      <div className="decision-head">
+        <div>
+          <h2 className="panel-title"><Target size={15} /> Signal decision context</h2>
+          <p className="text-muted decision-copy">
+            Read-only view of the current shadow plan. It explains levels and context, but it does not place orders or override strategy rules.
+          </p>
+        </div>
+        <div className="decision-controls">
+          <select value={signalKey(signal)} onChange={(event) => onSelectSignal(event.target.value)}>
+            {signalOptions.map((item) => (
+              <option key={signalKey(item)} value={signalKey(item)}>
+                {item.status === 'OPEN' ? 'OPEN | ' : ''}{item.symbol} {item.side} {formatDate(item.generated_at)} | {shortId(item.config_id)}
+              </option>
+            ))}
+          </select>
+          <div className="segmented">
+            {['15m', '1h', '4h'].map((item) => (
+              <button
+                className={interval === item ? 'segmented-active' : ''}
+                key={item}
+                type="button"
+                onClick={() => setInterval(item)}
+              >
+                {item}
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {marketState.error && (
+        <div className="sample-warning" style={{ marginBottom: 12 }}>
+          Market context partially unavailable: {marketState.error}
+        </div>
+      )}
+
+      <div className="decision-grid">
+        <div className="decision-chart-card">
+          <div className="section-head">
+            <div>
+              <div className="mono decision-title">{signal.symbol} {interval} {signal.side}</div>
+              <div className="text-muted" style={{ fontSize: 12 }}>
+                Generated {formatDate(signal.generated_at)} | Config {shortId(signal.config_id)}
+              </div>
+            </div>
+            {marketState.loading && <span className="spinner" />}
+          </div>
+          <SignalPriceChart marketData={selectedMarket} signal={signal} interval={interval} />
+        </div>
+
+        <div className="decision-side-panel">
+          <section className="level-card">
+            <div className="mono" style={{ marginBottom: 10 }}>Shadow trade plan</div>
+            <StatLine label="Side" value={signal.side || '-'} tone={signal.side === 'LONG' ? 'good' : 'bad'} />
+            <StatLine label="Entry" value={formatNumber(signal.entry_price, 6)} />
+            <StatLine label="Stop loss" value={formatNumber(signal.stop_loss, 6)} tone="bad" />
+            <StatLine label="Take profit" value={formatNumber(signal.take_profit, 6)} tone="good" />
+            <StatLine label="Risk reward" value={formatNumber(signal.risk_reward, 2)} />
+            <StatLine label="Horizon" value={`${signal.horizon_candles || '-'} candles / ${signal.horizon_minutes || '-'} min`} />
+            <StatLine label="Confidence" value={formatPct(signal.confidence)} />
+          </section>
+
+          <section className={`level-card context-${decision?.tone || 'warn'}`}>
+            <div className="mono" style={{ marginBottom: 10 }}>Tactical read</div>
+            <div className={decision?.tone === 'good' ? 'text-green' : decision?.tone === 'bad' ? 'text-red' : 'text-amber'}>
+              {decision?.label || 'No context loaded yet.'}
+            </div>
+            <div className="stack" style={{ marginTop: 12 }}>
+              <StatLine label="Buy probability" value={formatProbability(features.probability_buy_win, 2)} />
+              <StatLine label="Sell probability" value={formatProbability(features.probability_sell_win, 2)} />
+              <StatLine label="Agent review" value={review.review_status || '-'} tone={review.review_status === 'BLOCK' ? 'bad' : review.review_status === 'CAUTION' ? 'warn' : 'neutral'} />
+              <StatLine label="Near support" value={formatNumber(selectedLevels.support, 6)} />
+              <StatLine label="Near resistance" value={formatNumber(selectedLevels.resistance, 6)} />
+              <StatLine label="24-candle range" value={formatPct(selectedLevels.rangePct)} />
+            </div>
+          </section>
+        </div>
+      </div>
+
+      <div className="timeframe-grid">
+        {['15m', '1h', '4h'].map((item) => (
+          <TimeframeContextCard key={item} interval={item} marketData={marketState.data[item]} signal={signal} />
+        ))}
+      </div>
+
+      <div className="sample-warning">
+        This is paper/shadow research. A visually aligned chart is not enough for real-money execution; measured PF, drawdown, and larger live samples remain the gate.
+      </div>
     </section>
   )
 }
@@ -990,6 +1373,7 @@ export default function ShadowSignalsPage() {
   const [state, setState] = useState({ loading: true, error: '', health: null, summary: null, signals: [], cycles: [] })
   const [selectedConfig, setSelectedConfig] = useState('')
   const [configDrawerId, setConfigDrawerId] = useState('')
+  const [selectedDecisionSignalId, setSelectedDecisionSignalId] = useState('')
 
   async function load() {
     setState((current) => ({ ...current, loading: true, error: '' }))
@@ -1018,6 +1402,7 @@ export default function ShadowSignalsPage() {
   }, [])
 
   const summary = state.summary?.summary || state.health?.summary || {}
+  const strategySummary = state.summary?.strategy_eligible || {}
   const pfTone = Number(summary.profit_factor) > 1 ? 'good' : Number(summary.profit_factor) > 0 ? 'warn' : 'neutral'
   const avgTone = Number(summary.avg_return) > 0 ? 'good' : Number(summary.avg_return) < 0 ? 'bad' : 'neutral'
   const source = state.summary ? 'backend shadow API' : 'loading'
@@ -1044,6 +1429,16 @@ export default function ShadowSignalsPage() {
       setSelectedConfig(configRows[0].configId)
     }
   }, [configRows, selectedConfig])
+
+  useEffect(() => {
+    if (sortedSignals.length === 0) {
+      setSelectedDecisionSignalId('')
+      return
+    }
+    if (!sortedSignals.some((item) => signalKey(item) === selectedDecisionSignalId)) {
+      setSelectedDecisionSignalId(signalKey(latestOpen[0] || sortedSignals[0]))
+    }
+  }, [sortedSignals, selectedDecisionSignalId, latestOpen])
 
   return (
     <>
@@ -1089,11 +1484,23 @@ export default function ShadowSignalsPage() {
             <Kpi label="Max Drawdown" value={formatPct(summary.max_drawdown)} tone={Number(summary.max_drawdown) > 10 ? 'bad' : 'neutral'} />
           </div>
 
+          <StrategyEvidenceStrip
+            strategySummary={strategySummary}
+            technicalExclusions={state.summary?.technical_exclusions}
+            exclusionsByReason={state.summary?.technical_exclusions_by_exit_reason}
+          />
+
           <div className="ops-grid">
             <ActiveSignalPanel signal={latestOpen[0]} />
             <FreshnessPanel health={state.health} summary={state.summary} signals={sortedSignals} />
             <SignalContextPanel signal={latestSignal} />
           </div>
+
+          <SignalDecisionView
+            signals={sortedSignals}
+            selectedSignalId={selectedDecisionSignalId}
+            onSelectSignal={setSelectedDecisionSignalId}
+          />
 
           <div className="shadow-grid">
             <SymbolSummary bySymbol={state.summary?.by_symbol || {}} />

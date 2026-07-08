@@ -250,6 +250,9 @@ async def shadow_summary():
     return {
         "data": {
             "summary": report.get("summary"),
+            "strategy_eligible": report.get("strategy_eligible"),
+            "technical_exclusions": report.get("technical_exclusions"),
+            "technical_exclusions_by_exit_reason": report.get("technical_exclusions_by_exit_reason"),
             "by_symbol": report.get("by_symbol"),
             "by_config": report.get("by_config"),
             "by_timeframe": report.get("by_timeframe"),

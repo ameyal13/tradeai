@@ -84,6 +84,32 @@ def _json_dict(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def is_strategy_eligible_shadow_signal(row: dict[str, Any]) -> bool:
+    """Return True for outcomes that represent actual strategy evidence.
+
+    Technical expirations such as historical evaluation HTTP errors are kept in
+    the operational journal, but they should not be mixed into strategy metrics.
+    """
+    outcome = str(row.get("outcome") or "").upper()
+    exit_reason = str(row.get("exit_reason") or "")
+    return outcome not in {"EXPIRED", "INVALID", ""} and exit_reason != "evaluation_http_error"
+
+
+def shadow_strategy_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    closed_rows = [row for row in rows if row.get("status") in {"CLOSED", "EXPIRED"}]
+    eligible_rows = [row for row in closed_rows if is_strategy_eligible_shadow_signal(row)]
+    technical_exclusions = [row for row in closed_rows if not is_strategy_eligible_shadow_signal(row)]
+    by_exit_reason: dict[str, int] = {}
+    for row in technical_exclusions:
+        reason = str(row.get("exit_reason") or row.get("outcome") or "UNKNOWN")
+        by_exit_reason[reason] = by_exit_reason.get(reason, 0) + 1
+    return {
+        "summary": summarize_rows(eligible_rows),
+        "technical_exclusions": len(technical_exclusions),
+        "technical_exclusions_by_exit_reason": dict(sorted(by_exit_reason.items())),
+    }
+
+
 def normalize_shadow_signal_for_store(row: dict[str, Any]) -> dict[str, Any]:
     """Normalize one latest shadow row for the ``shadow_signals`` table."""
     payload = {
@@ -196,10 +222,14 @@ class ShadowSignalRepository:
         if prefer_supabase and self.supabase is not None:
             try:
                 rows = self.supabase.table("shadow_signals").select("*").execute().data or []
+                strategy_summary = shadow_strategy_summary(rows)
                 return {
                     "source": "supabase",
                     "journal_path": str(self.journal_path),
                     "summary": summarize_rows(rows),
+                    "strategy_eligible": strategy_summary["summary"],
+                    "technical_exclusions": strategy_summary["technical_exclusions"],
+                    "technical_exclusions_by_exit_reason": strategy_summary["technical_exclusions_by_exit_reason"],
                     "by_symbol": group_summaries(rows, "symbol"),
                     "by_config": group_summaries(rows, "config_id"),
                     "by_timeframe": group_summaries(rows, "timeframe"),
@@ -208,6 +238,10 @@ class ShadowSignalRepository:
             except Exception:
                 pass
         report = build_shadow_summary(self.journal_path)
+        strategy_summary = shadow_strategy_summary(report.get("signals") or [])
+        report["strategy_eligible"] = strategy_summary["summary"]
+        report["technical_exclusions"] = strategy_summary["technical_exclusions"]
+        report["technical_exclusions_by_exit_reason"] = strategy_summary["technical_exclusions_by_exit_reason"]
         report["source"] = "local_jsonl"
         return report
 

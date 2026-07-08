@@ -6,6 +6,7 @@ from pathlib import Path
 from tools.shadow_signal_journal import ShadowSignalJournal
 from tools.shadow_signal_repository import (
     ShadowSignalRepository,
+    shadow_strategy_summary,
     normalize_shadow_event_for_store,
     normalize_shadow_signal_for_store,
 )
@@ -117,6 +118,24 @@ class ShadowSignalRepositoryTests(unittest.TestCase):
         self.assertEqual(open_rows[0]["shadow_signal_id"], "sig1")
         self.assertEqual(summary["summary"]["open"], 1)
         self.assertEqual(summary["summary"]["closed"], 1)
+
+    def test_strategy_summary_excludes_technical_evaluation_errors(self):
+        rows = [
+            shadow_row("sig1", status="CLOSED", outcome="WIN", pnl=2.0),
+            shadow_row("sig2", status="CLOSED", outcome="LOSS", pnl=-1.0),
+            {
+                **shadow_row("sig3", status="EXPIRED", outcome="EXPIRED", pnl=0.0),
+                "exit_reason": "evaluation_http_error",
+            },
+        ]
+
+        summary = shadow_strategy_summary(rows)
+
+        self.assertEqual(summary["summary"]["closed"], 2)
+        self.assertEqual(summary["summary"]["wins"], 1)
+        self.assertEqual(summary["summary"]["losses"], 1)
+        self.assertEqual(summary["technical_exclusions"], 1)
+        self.assertEqual(summary["technical_exclusions_by_exit_reason"]["evaluation_http_error"], 1)
 
     def test_sync_local_to_supabase_upserts_latest_and_events(self):
         with tempfile.TemporaryDirectory() as tmp:
