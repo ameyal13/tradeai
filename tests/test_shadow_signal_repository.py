@@ -6,6 +6,7 @@ from pathlib import Path
 from tools.shadow_signal_journal import ShadowSignalJournal
 from tools.shadow_signal_repository import (
     ShadowSignalRepository,
+    shadow_config_health,
     shadow_strategy_summary,
     normalize_shadow_event_for_store,
     normalize_shadow_signal_for_store,
@@ -136,6 +137,33 @@ class ShadowSignalRepositoryTests(unittest.TestCase):
         self.assertEqual(summary["summary"]["losses"], 1)
         self.assertEqual(summary["technical_exclusions"], 1)
         self.assertEqual(summary["technical_exclusions_by_exit_reason"]["evaluation_http_error"], 1)
+
+    def test_config_health_classifies_quarantine_keep_and_insufficient(self):
+        rows = [
+            shadow_row("bad1", status="CLOSED", outcome="LOSS", pnl=-1.0),
+            shadow_row("bad2", status="CLOSED", outcome="LOSS", pnl=-1.2),
+            shadow_row("bad3", status="CLOSED", outcome="LOSS", pnl=-0.8),
+            shadow_row("bad4", status="CLOSED", outcome="LOSS", pnl=-0.5),
+            shadow_row("bad5", status="CLOSED", outcome="LOSS", pnl=-0.7),
+            shadow_row("new1", status="CLOSED", outcome="WIN", pnl=1.0),
+        ]
+        for row in rows[:5]:
+            row["config_id"] = "bad-config"
+        rows[-1]["config_id"] = "new-config"
+        good_rows = []
+        for index in range(10):
+            outcome = "WIN" if index < 7 else "LOSS"
+            pnl = 1.0 if outcome == "WIN" else -0.5
+            row = shadow_row(f"good{index}", status="CLOSED", outcome=outcome, pnl=pnl)
+            row["config_id"] = "good-config"
+            good_rows.append(row)
+
+        report = shadow_config_health(rows + good_rows)
+        by_config = {item["config_id"]: item for item in report["configs"]}
+
+        self.assertEqual(by_config["bad-config"]["recommendation"], "quarantine_candidate")
+        self.assertEqual(by_config["good-config"]["recommendation"], "keep_candidate")
+        self.assertEqual(by_config["new-config"]["recommendation"], "insufficient_sample")
 
     def test_sync_local_to_supabase_upserts_latest_and_events(self):
         with tempfile.TemporaryDirectory() as tmp:

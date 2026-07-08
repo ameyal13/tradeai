@@ -410,6 +410,103 @@ function StrategyEvidenceStrip({ strategySummary, technicalExclusions, exclusion
   )
 }
 
+function recommendationTone(recommendation) {
+  if (recommendation === 'keep_candidate') return 'good'
+  if (recommendation === 'quarantine_candidate') return 'bad'
+  if (recommendation === 'watch') return 'warn'
+  return 'neutral'
+}
+
+function recommendationClass(recommendation) {
+  if (recommendation === 'keep_candidate') return 'badge-buy'
+  if (recommendation === 'quarantine_candidate') return 'badge-high'
+  if (recommendation === 'watch') return 'badge-medium'
+  return 'badge-low'
+}
+
+function ConfigHealthPanel({ report, onOpenConfig }) {
+  const summary = report?.summary || {}
+  const configs = report?.configs || []
+  const counts = summary.recommendation_counts || {}
+  const focusedConfigs = configs.slice(0, 12)
+  return (
+    <section className="card config-health-panel">
+      <div className="section-head">
+        <div>
+          <h2 className="panel-title">Config health</h2>
+          <p className="text-muted" style={{ fontSize: 13 }}>
+            Read-only recommendations from live shadow outcomes. This does not pause configs automatically.
+          </p>
+        </div>
+        <div className="tag-row">
+          {Object.entries(counts).length ? (
+            Object.entries(counts).map(([key, value]) => <span className="tag" key={key}>{key}: {String(value)}</span>)
+          ) : (
+            <span className="tag">no config evidence</span>
+          )}
+        </div>
+      </div>
+      {focusedConfigs.length === 0 ? (
+        <div className="text-muted">No config health data yet.</div>
+      ) : (
+        <>
+          <div className="config-health-grid">
+            <StatLine label="Configs tracked" value={summary.total_configs ?? 0} />
+            <StatLine label="Quarantine candidates" value={counts.quarantine_candidate ?? 0} tone={(counts.quarantine_candidate || 0) > 0 ? 'bad' : 'neutral'} />
+            <StatLine label="Keep candidates" value={counts.keep_candidate ?? 0} tone={(counts.keep_candidate || 0) > 0 ? 'good' : 'neutral'} />
+            <StatLine label="Insufficient sample" value={counts.insufficient_sample ?? 0} />
+          </div>
+          <div style={{ overflowX: 'auto', marginTop: 14 }}>
+            <table className="data-table">
+              <thead>
+                <tr>
+                  <th>Recommendation</th>
+                  <th>Config</th>
+                  <th>Symbol</th>
+                  <th>Valid</th>
+                  <th>W/L</th>
+                  <th>PF</th>
+                  <th>Avg</th>
+                  <th>DD</th>
+                  <th>Direction</th>
+                  <th>Reasons</th>
+                </tr>
+              </thead>
+              <tbody>
+                {focusedConfigs.map((row) => (
+                  <tr key={row.config_id}>
+                    <td><span className={`badge ${recommendationClass(row.recommendation)}`}>{row.recommendation}</span></td>
+                    <td>
+                      <button className="table-link mono" type="button" onClick={() => onOpenConfig(row.config_id)}>
+                        {shortId(row.config_id)}
+                      </button>
+                    </td>
+                    <td className="mono">{row.symbol} {row.timeframe}</td>
+                    <td>{row.strategy_closed}</td>
+                    <td>{row.wins}/{row.losses}</td>
+                    <td>{formatNumber(row.profit_factor, 4)}</td>
+                    <td className={Number(row.avg_return) >= 0 ? 'text-green' : 'text-red'}>{formatPct(row.avg_return, 4)}</td>
+                    <td>{formatPct(row.max_drawdown)}</td>
+                    <td>{row.direction_bias}</td>
+                    <td>
+                      <div className="tag-row">
+                        {(row.reasons || []).slice(0, 3).map((reason) => <span className="tag" key={`${row.config_id}-${reason}`}>{reason}</span>)}
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <div className="sample-warning">
+            Quarantine candidates are evidence flags only. The shadow generator still uses the current approved registry until a separate, tested gating change is made.
+          </div>
+        </>
+      )}
+    </section>
+  )
+}
+
 function SignalPriceChart({ marketData, signal, interval, height = 360 }) {
   const containerRef = useRef(null)
   const candles = useMemo(() => getCandles(marketData), [marketData])
@@ -1370,7 +1467,7 @@ function SignalsTable({ signals, onOpenConfig }) {
 }
 
 export default function ShadowSignalsPage() {
-  const [state, setState] = useState({ loading: true, error: '', health: null, summary: null, signals: [], cycles: [] })
+  const [state, setState] = useState({ loading: true, error: '', health: null, summary: null, signals: [], cycles: [], configHealth: null })
   const [selectedConfig, setSelectedConfig] = useState('')
   const [configDrawerId, setConfigDrawerId] = useState('')
   const [selectedDecisionSignalId, setSelectedDecisionSignalId] = useState('')
@@ -1378,11 +1475,12 @@ export default function ShadowSignalsPage() {
   async function load() {
     setState((current) => ({ ...current, loading: true, error: '' }))
     try {
-      const [health, summary, signals, cycles] = await Promise.all([
+      const [health, summary, signals, cycles, configHealth] = await Promise.all([
         api.shadow.health(),
         api.shadow.summary(),
         api.shadow.signals({ limit: 200 }),
         api.shadow.cycles({ limit: 20 }),
+        api.shadow.configHealth(),
       ])
       setState({
         loading: false,
@@ -1391,9 +1489,10 @@ export default function ShadowSignalsPage() {
         summary: summary.data,
         signals: signals.data || [],
         cycles: cycles.data || [],
+        configHealth: configHealth.data,
       })
     } catch (err) {
-      setState({ loading: false, error: err.message, health: null, summary: null, signals: [], cycles: [] })
+      setState({ loading: false, error: err.message, health: null, summary: null, signals: [], cycles: [], configHealth: null })
     }
   }
 
@@ -1501,6 +1600,8 @@ export default function ShadowSignalsPage() {
             selectedSignalId={selectedDecisionSignalId}
             onSelectSignal={setSelectedDecisionSignalId}
           />
+
+          <ConfigHealthPanel report={state.configHealth} onOpenConfig={setConfigDrawerId} />
 
           <div className="shadow-grid">
             <SymbolSummary bySymbol={state.summary?.by_symbol || {}} />

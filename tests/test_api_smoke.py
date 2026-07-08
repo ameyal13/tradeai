@@ -163,13 +163,17 @@ class ApiSmokeTests(unittest.TestCase):
         health = self.client.get("/shadow/health")
         signals = self.client.get("/shadow/signals?status=OPEN&symbol=ADA")
         summary = self.client.get("/shadow/summary")
+        config_health = self.client.get("/shadow/config-health")
 
         self.assertEqual(health.status_code, 200)
         self.assertEqual(signals.status_code, 200)
         self.assertEqual(summary.status_code, 200)
+        self.assertEqual(config_health.status_code, 200)
         self.assertTrue(health.json()["research_only"])
         self.assertEqual(signals.json()["count"], 1)
         self.assertEqual(summary.json()["data"]["summary"]["open"], 1)
+        self.assertTrue(config_health.json()["research_only"])
+        self.assertFalse(config_health.json()["auto_quarantine_enabled"])
 
     def test_research_summary_endpoint_is_read_only(self):
         response = self.client.get("/research/summary")

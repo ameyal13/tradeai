@@ -38,6 +38,7 @@ export const api = {
       return request(`/shadow/signals?${params.toString()}`)
     },
     cycles:     ({ limit = 20 } = {}) => request(`/shadow/cycles?limit=${limit}`),
+    configHealth: ()                   => request('/shadow/config-health'),
   },
   research: {
     summary:    ({ source = 'crypto_multi' } = {}) => request(`/research/summary?source=${encodeURIComponent(source)}`),

@@ -277,6 +277,18 @@ async def list_shadow_cycles(limit: int = 20):
     }
 
 
+@app.get("/shadow/config-health")
+async def shadow_config_health():
+    """Read-only config health diagnostics for shadow strategy evidence."""
+    report = shadow_signal_repo.config_health(prefer_supabase=True)
+    return {
+        "data": report,
+        "research_only": True,
+        "no_real_trading": True,
+        "auto_quarantine_enabled": False,
+    }
+
+
 @app.get("/research/summary")
 async def research_summary(source: str = "crypto_multi"):
     """Read-only research summary for dashboards.

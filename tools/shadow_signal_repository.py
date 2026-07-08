@@ -110,6 +110,120 @@ def shadow_strategy_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _classify_config_health(
+    eligible_summary: dict[str, Any],
+    wins: int,
+    losses: int,
+    eligible_closed: int,
+) -> tuple[str, list[str]]:
+    reasons: list[str] = []
+    pf = _finite_float(eligible_summary.get("profit_factor"))
+    avg = _finite_float(eligible_summary.get("avg_return")) or 0.0
+    drawdown = _finite_float(eligible_summary.get("max_drawdown")) or 0.0
+
+    if eligible_closed < 5:
+        return "insufficient_sample", ["fewer_than_5_strategy_outcomes"]
+
+    if wins == 0 and losses >= 3:
+        reasons.append("zero_wins_after_multiple_losses")
+    if pf is not None and pf < 0.75 and avg < 0:
+        reasons.append("pf_below_0_75_and_avg_negative")
+    if eligible_closed >= 8 and avg < 0 and drawdown >= 8:
+        reasons.append("negative_avg_with_high_drawdown")
+    if reasons:
+        return "quarantine_candidate", reasons
+
+    if eligible_closed >= 10 and pf is not None and pf >= 1.15 and avg > 0:
+        return "keep_candidate", ["pf_above_1_15_and_avg_positive"]
+
+    if pf is not None and pf >= 1.0 and avg > 0:
+        return "watch", ["positive_but_sample_or_pf_not_enough"]
+    return "watch", ["mixed_or_unproven_live_evidence"]
+
+
+def shadow_config_health(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        config_id = str(row.get("config_id") or "unknown")
+        groups.setdefault(config_id, []).append(row)
+
+    configs: list[dict[str, Any]] = []
+    counts: dict[str, int] = {}
+    for config_id, group_rows in groups.items():
+        sorted_rows = sorted(group_rows, key=lambda row: str(row.get("generated_at") or row.get("updated_at") or ""))
+        latest = sorted_rows[-1] if sorted_rows else {}
+        eligible_rows = [row for row in group_rows if row.get("status") in {"CLOSED", "EXPIRED"} and is_strategy_eligible_shadow_signal(row)]
+        technical_exclusions = [
+            row
+            for row in group_rows
+            if row.get("status") in {"CLOSED", "EXPIRED"} and not is_strategy_eligible_shadow_signal(row)
+        ]
+        eligible_summary = summarize_rows(eligible_rows)
+        wins = int(eligible_summary.get("wins") or 0)
+        losses = int(eligible_summary.get("losses") or 0)
+        eligible_closed = int(eligible_summary.get("closed") or 0)
+        recommendation, reasons = _classify_config_health(eligible_summary, wins, losses, eligible_closed)
+        counts[recommendation] = counts.get(recommendation, 0) + 1
+        long_count = sum(1 for row in group_rows if row.get("side") == "LONG")
+        short_count = sum(1 for row in group_rows if row.get("side") == "SHORT")
+        configs.append({
+            "config_id": config_id,
+            "recommendation": recommendation,
+            "reasons": reasons,
+            "symbol": latest.get("symbol"),
+            "timeframe": latest.get("timeframe"),
+            "classification": latest.get("classification"),
+            "source_registry": latest.get("source_registry"),
+            "strategy_mode": latest.get("strategy_mode"),
+            "latest_status": latest.get("status"),
+            "latest_outcome": latest.get("outcome"),
+            "latest_generated_at": latest.get("generated_at"),
+            "latest_updated_at": latest.get("updated_at") or latest.get("recorded_at"),
+            "total_signals": len(group_rows),
+            "open_signals": sum(1 for row in group_rows if row.get("status") == "OPEN"),
+            "operational_closed": sum(1 for row in group_rows if row.get("status") in {"CLOSED", "EXPIRED"}),
+            "strategy_closed": eligible_closed,
+            "wins": wins,
+            "losses": losses,
+            "win_rate": eligible_summary.get("win_rate"),
+            "profit_factor": eligible_summary.get("profit_factor"),
+            "avg_return": eligible_summary.get("avg_return"),
+            "total_return_pct": eligible_summary.get("total_return_pct"),
+            "max_drawdown": eligible_summary.get("max_drawdown"),
+            "technical_exclusions": len(technical_exclusions),
+            "long_count": long_count,
+            "short_count": short_count,
+            "direction_bias": (
+                "LONG" if long_count > short_count * 2 else
+                "SHORT" if short_count > long_count * 2 else
+                "mixed"
+            ),
+        })
+
+    priority = {
+        "quarantine_candidate": 0,
+        "keep_candidate": 1,
+        "watch": 2,
+        "insufficient_sample": 3,
+    }
+    configs.sort(key=lambda item: (
+        priority.get(str(item.get("recommendation")), 9),
+        -(int(item.get("strategy_closed") or 0)),
+        -(_finite_float(item.get("profit_factor")) or -1.0),
+    ))
+    return {
+        "summary": {
+            "total_configs": len(configs),
+            "recommendation_counts": dict(sorted(counts.items())),
+            "research_only": True,
+            "auto_quarantine_enabled": False,
+            "min_strategy_outcomes_for_quarantine": 5,
+            "min_strategy_outcomes_for_keep": 10,
+        },
+        "configs": configs,
+    }
+
+
 def normalize_shadow_signal_for_store(row: dict[str, Any]) -> dict[str, Any]:
     """Normalize one latest shadow row for the ``shadow_signals`` table."""
     payload = {
@@ -242,6 +356,20 @@ class ShadowSignalRepository:
         report["strategy_eligible"] = strategy_summary["summary"]
         report["technical_exclusions"] = strategy_summary["technical_exclusions"]
         report["technical_exclusions_by_exit_reason"] = strategy_summary["technical_exclusions_by_exit_reason"]
+        report["source"] = "local_jsonl"
+        return report
+
+    def config_health(self, prefer_supabase: bool = True) -> dict[str, Any]:
+        if prefer_supabase and self.supabase is not None:
+            try:
+                rows = self.supabase.table("shadow_signals").select("*").execute().data or []
+                report = shadow_config_health(rows)
+                report["source"] = "supabase"
+                return report
+            except Exception:
+                pass
+        rows = load_latest_shadow_rows(self.journal_path)
+        report = shadow_config_health(rows)
         report["source"] = "local_jsonl"
         return report
 
