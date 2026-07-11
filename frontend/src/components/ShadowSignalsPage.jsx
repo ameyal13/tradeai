@@ -424,7 +424,7 @@ function recommendationClass(recommendation) {
   return 'badge-low'
 }
 
-function ConfigHealthPanel({ report, onOpenConfig }) {
+function ConfigHealthPanel({ report, error, onOpenConfig }) {
   const summary = report?.summary || {}
   const configs = report?.configs || []
   const counts = summary.recommendation_counts || {}
@@ -446,7 +446,11 @@ function ConfigHealthPanel({ report, onOpenConfig }) {
           )}
         </div>
       </div>
-      {focusedConfigs.length === 0 ? (
+      {error ? (
+        <div className="sample-warning">
+          Config health is temporarily unavailable: {error}. Shadow signal data can still be reviewed above.
+        </div>
+      ) : focusedConfigs.length === 0 ? (
         <div className="text-muted">No config health data yet.</div>
       ) : (
         <>
@@ -1467,7 +1471,7 @@ function SignalsTable({ signals, onOpenConfig }) {
 }
 
 export default function ShadowSignalsPage() {
-  const [state, setState] = useState({ loading: true, error: '', health: null, summary: null, signals: [], cycles: [], configHealth: null })
+  const [state, setState] = useState({ loading: true, error: '', health: null, summary: null, signals: [], cycles: [], configHealth: null, configHealthError: '' })
   const [selectedConfig, setSelectedConfig] = useState('')
   const [configDrawerId, setConfigDrawerId] = useState('')
   const [selectedDecisionSignalId, setSelectedDecisionSignalId] = useState('')
@@ -1480,7 +1484,9 @@ export default function ShadowSignalsPage() {
         api.shadow.summary(),
         api.shadow.signals({ limit: 200 }),
         api.shadow.cycles({ limit: 20 }),
-        api.shadow.configHealth(),
+        api.shadow.configHealth()
+          .then((res) => ({ ok: true, data: res.data }))
+          .catch((err) => ({ ok: false, error: err.message })),
       ])
       setState({
         loading: false,
@@ -1489,10 +1495,11 @@ export default function ShadowSignalsPage() {
         summary: summary.data,
         signals: signals.data || [],
         cycles: cycles.data || [],
-        configHealth: configHealth.data,
+        configHealth: configHealth.ok ? configHealth.data : null,
+        configHealthError: configHealth.ok ? '' : configHealth.error,
       })
     } catch (err) {
-      setState({ loading: false, error: err.message, health: null, summary: null, signals: [], cycles: [], configHealth: null })
+      setState({ loading: false, error: err.message, health: null, summary: null, signals: [], cycles: [], configHealth: null, configHealthError: '' })
     }
   }
 
@@ -1601,7 +1608,7 @@ export default function ShadowSignalsPage() {
             onSelectSignal={setSelectedDecisionSignalId}
           />
 
-          <ConfigHealthPanel report={state.configHealth} onOpenConfig={setConfigDrawerId} />
+          <ConfigHealthPanel report={state.configHealth} error={state.configHealthError} onOpenConfig={setConfigDrawerId} />
 
           <div className="shadow-grid">
             <SymbolSummary bySymbol={state.summary?.by_symbol || {}} />
