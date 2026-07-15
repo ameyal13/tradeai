@@ -1,0 +1,44 @@
+name: Shadow Ops
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 * * * *"
+
+concurrency:
+  group: tradeai-shadow-ops
+  cancel-in-progress: false
+
+jobs:
+  shadow-ops:
+    name: Run shadow ops once
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      TRADEAI_SUPABASE_FIRST: "true"
+      PYTHONUNBUFFERED: "1"
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      SUPABASE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Run shadow ops
+        run: >
+          python scripts/run_shadow_ops_once.py
+          --max-signals 1
+          --max-configs-scanned 21
+          --use-news-context
+          --notify-telegram

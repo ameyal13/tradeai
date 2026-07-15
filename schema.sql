@@ -153,6 +153,24 @@ on shadow_signal_events(shadow_signal_id, event_sequence);
 alter table shadow_signals enable row level security;
 alter table shadow_signal_events enable row level security;
 
+drop policy if exists "shadow_signals_anon_select_research_only" on shadow_signals;
+create policy "shadow_signals_anon_select_research_only"
+on shadow_signals for select
+to anon
+using (research_only = true);
+
+drop policy if exists "shadow_signal_events_anon_select_research_only" on shadow_signal_events;
+create policy "shadow_signal_events_anon_select_research_only"
+on shadow_signal_events for select
+to anon
+using (
+  exists (
+    select 1 from shadow_signals
+    where shadow_signals.shadow_signal_id = shadow_signal_events.shadow_signal_id
+    and shadow_signals.research_only = true
+  )
+);
+
 create table if not exists shadow_ops_cycles (
   cycle_id text primary key,
   started_at timestamptz null,
@@ -183,6 +201,12 @@ create index if not exists shadow_ops_cycles_finished_idx
 on shadow_ops_cycles(finished_at desc);
 
 alter table shadow_ops_cycles enable row level security;
+
+drop policy if exists "shadow_ops_cycles_anon_select_research_only" on shadow_ops_cycles;
+create policy "shadow_ops_cycles_anon_select_research_only"
+on shadow_ops_cycles for select
+to anon
+using (research_only = true);
 
 create table if not exists research_configs (
   config_id text primary key,
@@ -222,6 +246,12 @@ create index if not exists research_configs_validation_pf_idx
 on research_configs(median_validation_pf desc nulls last);
 
 alter table research_configs enable row level security;
+
+drop policy if exists "research_configs_anon_select" on research_configs;
+create policy "research_configs_anon_select"
+on research_configs for select
+to anon
+using (true);
 
 create table if not exists shadow_ops_locks (
   lock_name text primary key,

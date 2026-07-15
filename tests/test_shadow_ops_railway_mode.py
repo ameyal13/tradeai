@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 from scripts.run_shadow_ops_once import (
     run_shadow_ops_once,
+    supabase_first_requested,
     summarize_evaluation_errors,
     supabase_candidate_configs,
     supabase_research_config_diagnostics,
@@ -25,6 +26,10 @@ def empty_summary():
 
 
 class RailwayShadowOpsModeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_supabase_first_can_be_requested_without_railway(self):
+        with patch.dict("os.environ", {"TRADEAI_SUPABASE_FIRST": "true"}, clear=True):
+            self.assertTrue(supabase_first_requested())
+
     async def test_healthcheck_does_not_warn_journal_missing_on_railway(self):
         with tempfile.TemporaryDirectory() as tmp:
             missing_journal = Path(tmp) / "missing.jsonl"
@@ -38,6 +43,23 @@ class RailwayShadowOpsModeTests(unittest.IsolatedAsyncioTestCase):
                     })):
                         report = await build_healthcheck_report(journal_path=missing_journal)
 
+        self.assertNotIn("shadow_journal_missing", report["warnings"])
+        self.assertNotIn("crypto_multi_registry_missing", report["blockers"])
+
+    async def test_healthcheck_does_not_warn_journal_missing_on_supabase_first(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            missing_journal = Path(tmp) / "missing.jsonl"
+            with patch.dict("os.environ", {"TRADEAI_SUPABASE_FIRST": "true"}, clear=True):
+                with patch("scripts.shadow_ops_healthcheck.build_supabase_client_from_env", return_value=None):
+                    with patch("scripts.shadow_ops_healthcheck._check_market_connectivity", new=AsyncMock(return_value={
+                        "ok": True,
+                        "rows": 1,
+                        "error": None,
+                        "category": None,
+                    })):
+                        report = await build_healthcheck_report(journal_path=missing_journal)
+
+        self.assertTrue(report["supabase_mode"])
         self.assertNotIn("shadow_journal_missing", report["warnings"])
         self.assertNotIn("crypto_multi_registry_missing", report["blockers"])
 

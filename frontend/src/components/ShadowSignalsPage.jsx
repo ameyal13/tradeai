@@ -2,6 +2,7 @@ import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import { createChart, LineStyle } from 'lightweight-charts'
 import { Activity, AlertTriangle, Clock, Database, RefreshCw, ShieldCheck, Target, TrendingUp, X } from 'lucide-react'
 import { api } from '../lib/api.js'
+import { loadShadowSupabaseFallback } from '../lib/shadowSupabaseFallback.js'
 
 function formatNumber(value, digits = 2) {
   if (value === null || value === undefined || Number.isNaN(Number(value))) return '-'
@@ -1471,13 +1472,13 @@ function SignalsTable({ signals, onOpenConfig }) {
 }
 
 export default function ShadowSignalsPage() {
-  const [state, setState] = useState({ loading: true, error: '', health: null, summary: null, signals: [], cycles: [], configHealth: null, configHealthError: '' })
+  const [state, setState] = useState({ loading: true, error: '', warning: '', health: null, summary: null, signals: [], cycles: [], configHealth: null, configHealthError: '' })
   const [selectedConfig, setSelectedConfig] = useState('')
   const [configDrawerId, setConfigDrawerId] = useState('')
   const [selectedDecisionSignalId, setSelectedDecisionSignalId] = useState('')
 
   async function load() {
-    setState((current) => ({ ...current, loading: true, error: '' }))
+    setState((current) => ({ ...current, loading: true, error: '', warning: '' }))
     try {
       const [health, summary, signals, cycles, configHealth] = await Promise.all([
         api.shadow.health(),
@@ -1491,6 +1492,7 @@ export default function ShadowSignalsPage() {
       setState({
         loading: false,
         error: '',
+        warning: '',
         health,
         summary: summary.data,
         signals: signals.data || [],
@@ -1499,7 +1501,22 @@ export default function ShadowSignalsPage() {
         configHealthError: configHealth.ok ? '' : configHealth.error,
       })
     } catch (err) {
-      setState({ loading: false, error: err.message, health: null, summary: null, signals: [], cycles: [], configHealth: null, configHealthError: '' })
+      try {
+        const fallback = await loadShadowSupabaseFallback({ signalLimit: 200, cycleLimit: 20 })
+        setState({
+          loading: false,
+          error: '',
+          warning: `Backend unavailable (${err.message}). Reading Supabase directly in read-only fallback mode.`,
+          health: fallback.health,
+          summary: fallback.summary,
+          signals: fallback.signals,
+          cycles: fallback.cycles,
+          configHealth: fallback.configHealth,
+          configHealthError: '',
+        })
+      } catch (fallbackErr) {
+        setState({ loading: false, error: `${err.message}. ${fallbackErr.message}`, warning: '', health: null, summary: null, signals: [], cycles: [], configHealth: null, configHealthError: '' })
+      }
     }
   }
 
@@ -1511,7 +1528,7 @@ export default function ShadowSignalsPage() {
   const strategySummary = state.summary?.strategy_eligible || {}
   const pfTone = Number(summary.profit_factor) > 1 ? 'good' : Number(summary.profit_factor) > 0 ? 'warn' : 'neutral'
   const avgTone = Number(summary.avg_return) > 0 ? 'good' : Number(summary.avg_return) < 0 ? 'bad' : 'neutral'
-  const source = state.summary ? 'backend shadow API' : 'loading'
+  const source = state.summary?.source === 'supabase_fallback' ? 'Supabase fallback' : state.summary ? 'backend shadow API' : 'loading'
 
   const sortedSignals = useMemo(() => {
     return [...state.signals].sort((a, b) => {
@@ -1566,6 +1583,15 @@ export default function ShadowSignalsPage() {
           <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
             <AlertTriangle size={18} color="var(--red)" />
             <span className="text-red">Backend unavailable: {state.error}</span>
+          </div>
+        </section>
+      )}
+
+      {state.warning && (
+        <section className="card" style={{ borderColor: 'rgba(255,176,0,0.35)', background: 'rgba(255,176,0,0.07)', marginBottom: 16 }}>
+          <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
+            <AlertTriangle size={18} color="var(--amber)" />
+            <span className="text-amber">{state.warning}</span>
           </div>
         </section>
       )}

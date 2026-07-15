@@ -53,6 +53,11 @@ def running_on_railway() -> bool:
     return bool(os.getenv("RAILWAY_ENVIRONMENT"))
 
 
+def supabase_first_requested() -> bool:
+    value = str(os.getenv("TRADEAI_SUPABASE_FIRST") or "").strip().lower()
+    return running_on_railway() or bool(os.getenv("GITHUB_ACTIONS")) or value in {"1", "true", "yes", "on"}
+
+
 def parse_lock_dt(value: Any) -> datetime | None:
     if value is None:
         return None
@@ -380,8 +385,9 @@ async def run_shadow_ops_once(
     output_dir = Path(reports_output_dir) if reports_output_dir else default_shadow_reports_dir()
     cycles = Path(cycles_path) if cycles_path else DEFAULT_SHADOW_OPS_CYCLES_PATH
     railway_mode = running_on_railway()
-    supabase = build_supabase_client_from_env() if railway_mode else None
-    supabase_first = railway_mode and supabase is not None
+    supabase_mode = supabase_first_requested()
+    supabase = build_supabase_client_from_env() if supabase_mode else None
+    supabase_first = supabase_mode and supabase is not None
     signal_store = SupabaseShadowSignalStore(supabase) if supabase_first else None
     research_config_diagnostics = (
         supabase_research_config_diagnostics(
@@ -441,7 +447,7 @@ async def run_shadow_ops_once(
     generation_skipped_reason: str | None = None
     if open_after_eval > 0 and not allow_open_more_signals:
         generation_skipped_reason = "open_signals_exist"
-    elif railway_mode and not supabase_first:
+    elif supabase_mode and not supabase_first:
         generation_skipped_reason = "supabase_not_configured"
     elif supabase_first:
         generated = await generate_shadow_signals_once(
@@ -538,6 +544,7 @@ async def run_shadow_ops_once(
         "use_news_context": bool(use_news_context),
         "use_market_context": bool(use_market_context),
         "railway_mode": bool(railway_mode),
+        "supabase_mode": bool(supabase_mode),
         "supabase_first": bool(supabase_first),
         "sync_supabase": bool(sync_supabase),
         "health_before": health_before,
@@ -588,6 +595,7 @@ def print_ops_result(result: dict[str, Any]) -> None:
     print(f"use_news_context: {result.get('use_news_context')}")
     print(f"use_market_context: {result.get('use_market_context')}")
     print(f"railway_mode: {result.get('railway_mode')}")
+    print(f"supabase_mode: {result.get('supabase_mode')}")
     print(f"supabase_first: {result.get('supabase_first')}")
     print(f"sync_supabase: {result.get('sync_supabase')}")
     print(f"health_status: {(result.get('health_before') or {}).get('health_status')}")

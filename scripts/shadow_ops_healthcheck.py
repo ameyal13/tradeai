@@ -78,6 +78,11 @@ def running_on_railway() -> bool:
     return bool(os.getenv("RAILWAY_ENVIRONMENT"))
 
 
+def supabase_first_requested() -> bool:
+    value = str(os.getenv("TRADEAI_SUPABASE_FIRST") or "").strip().lower()
+    return running_on_railway() or bool(os.getenv("GITHUB_ACTIONS")) or value in {"1", "true", "yes", "on"}
+
+
 async def _check_market_connectivity() -> dict[str, Any]:
     try:
         candles = await fetch_binance_klines("BTC", "1h", limit=1, retries=0)
@@ -118,8 +123,9 @@ async def build_healthcheck_report(
     registry = Path(registry_path) if registry_path else Path(registry_path_for_choice("crypto_multi"))
     lock = Path(lock_path) if lock_path else default_lock_path()
     railway_mode = running_on_railway()
-    supabase = build_supabase_client_from_env() if railway_mode else None
-    if railway_mode and supabase is not None:
+    supabase_mode = supabase_first_requested()
+    supabase = build_supabase_client_from_env() if supabase_mode else None
+    if supabase_mode and supabase is not None:
         summary = ShadowSignalRepository(supabase_client=supabase, journal_path=journal).summary(prefer_supabase=True)
         summary["journal_path"] = str(journal)
     else:
@@ -134,7 +140,7 @@ async def build_healthcheck_report(
         except Exception:
             overdue.append(row)
 
-    if railway_mode and supabase is not None:
+    if supabase_mode and supabase is not None:
         registry_rows = ResearchResultRepository(supabase_client=supabase, source="crypto_multi").list_configs(limit=10_000)
     else:
         registry_rows = _load_registry_latest(registry)
@@ -153,11 +159,11 @@ async def build_healthcheck_report(
 
     warnings: list[str] = []
     blockers: list[str] = []
-    if not railway_mode and not journal.exists():
+    if not supabase_mode and not journal.exists():
         warnings.append("shadow_journal_missing")
     if not telegram_configured:
         warnings.append("telegram_env_missing")
-    if not railway_mode and not registry.exists():
+    if not supabase_mode and not registry.exists():
         blockers.append("crypto_multi_registry_missing")
     elif completed != 64:
         warnings.append(f"crypto_multi_completed_count_{completed}")
@@ -178,6 +184,7 @@ async def build_healthcheck_report(
     return {
         "generated_at": now.isoformat(),
         "health_status": health_status,
+        "supabase_mode": bool(supabase_mode),
         "warnings": warnings,
         "blockers": blockers,
         "shadow_journal": {
